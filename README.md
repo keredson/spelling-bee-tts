@@ -1,3 +1,5 @@
+![Spelling Bee icon](spelling-bee-tts.png)
+
 Install
 -------
 
@@ -22,4 +24,3 @@ python3 -m spellingbee
 Notes:
 - `edge-tts` requires network access.
 - You can override the voice with `EDGE_TTS_VOICE` (default: `en-US-AriaNeural`).
-

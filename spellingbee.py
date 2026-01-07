@@ -188,6 +188,7 @@ class SpellingBeeApp(Gtk.Application):
         self.current_word = random.choice(self.words)
         self.entry.set_text("")
         self.word_label.set_text("Listen and type the spelling.")
+        self.entry.grab_focus()
         self.speak("Please spell: "+ self.current_word)
 
     def on_submit(self, _widget):
@@ -220,6 +221,7 @@ class SpellingBeeApp(Gtk.Application):
     def on_say_again(self, _button):
         if self.current_word:
             self.speak(self.current_word)
+            self.entry.grab_focus()
 
     def update_score(self):
         self.score_label.set_text(f"Score: {self.correct}/{self.total}")
