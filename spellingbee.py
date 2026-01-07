@@ -39,9 +39,9 @@ class SpellingBeeApp(Gtk.Application):
         self.audio_dir = tempfile.TemporaryDirectory()
 
     def do_activate(self):
-        window = Gtk.ApplicationWindow(application=self)
-        window.set_title("Spelling Bee")
-        window.set_default_size(520, -1)
+        self.window = Gtk.ApplicationWindow(application=self)
+        self.window.set_title("Spelling Bee")
+        self.window.set_default_size(520, -1)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         outer.set_margin_top(12)
@@ -69,7 +69,7 @@ class SpellingBeeApp(Gtk.Application):
         self.list_scroller.set_min_content_height(220)
 
         self.load_button = Gtk.Button(label="Add Word List")
-        self.load_button.connect("clicked", self.on_choose_file, window)
+        self.load_button.connect("clicked", self.on_choose_file, self.window)
 
         self.start_button = Gtk.Button(label="Start Game")
         self.start_button.connect("clicked", self.on_start_game)
@@ -115,9 +115,9 @@ class SpellingBeeApp(Gtk.Application):
         self.load_recent_lists()
         self.refresh_list_model()
 
-        window.set_child(outer)
-        window.present()
-        self.check_system_dependencies(window)
+        self.window.set_child(outer)
+        self.window.present()
+        self.check_system_dependencies(self.window)
 
     def on_choose_file(self, _button, window):
         dialog = Gtk.FileChooserNative(
@@ -165,6 +165,7 @@ class SpellingBeeApp(Gtk.Application):
         self.header.set_visible(False)
         self.start_button.set_visible(True)
         self.word_label.set_text("Ready when you are.")
+        self.update_window_height()
 
     def on_start_game(self, _button):
         if not self.words:
@@ -175,6 +176,7 @@ class SpellingBeeApp(Gtk.Application):
         self.score_label.set_visible(True)
         self.entry.grab_focus()
         self.next_word()
+        self.update_window_height()
 
     def next_word(self):
         if not self.words:
@@ -423,6 +425,11 @@ class SpellingBeeApp(Gtk.Application):
             self.say_again_spinner.start()
         else:
             self.say_again_spinner.stop()
+
+    def update_window_height(self):
+        if not getattr(self, "window", None):
+            return
+        self.window.set_default_size(520, -1)
 
     def check_system_dependencies(self, window):
         missing = []
