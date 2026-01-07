@@ -5,6 +5,7 @@ import random
 import re
 import shutil
 import subprocess
+import sysconfig
 import tempfile
 import threading
 from pathlib import Path
@@ -116,6 +117,7 @@ class SpellingBeeApp(Gtk.Application):
 
         window.set_child(outer)
         window.present()
+        self.check_system_dependencies(window)
 
     def on_choose_file(self, _button, window):
         dialog = Gtk.FileChooserNative(
@@ -320,10 +322,12 @@ class SpellingBeeApp(Gtk.Application):
             append("empty", "No recent lists yet.")
 
         append("header", "Built-in")
-        builtin_dir = Path("word_lists")
-        builtin_paths = sorted(
-            builtin_dir.glob("*.txt"), key=lambda p: self.natural_key(p.stem)
-        )
+        builtin_dir = self.get_builtin_dir()
+        builtin_paths = []
+        if builtin_dir:
+            builtin_paths = sorted(
+                builtin_dir.glob("*.txt"), key=lambda p: self.natural_key(p.stem)
+            )
         if builtin_paths:
             for path in builtin_paths:
                 append("item", path.stem, str(path))
@@ -371,6 +375,17 @@ class SpellingBeeApp(Gtk.Application):
         parts = re.split(r"(\d+)", text.lower())
         return [int(part) if part.isdigit() else part for part in parts]
 
+    def get_builtin_dir(self):
+        candidates = [
+            Path(__file__).resolve().parent / "word_lists",
+            Path.cwd() / "word_lists",
+            Path(sysconfig.get_paths()["purelib"]) / "spellingbee_word_lists",
+        ]
+        for candidate in candidates:
+            if candidate.exists() and list(candidate.glob("*.txt")):
+                return candidate
+        return None
+
     def get_config_path(self):
         config_home = os.environ.get("XDG_CONFIG_HOME")
         if config_home:
@@ -408,6 +423,99 @@ class SpellingBeeApp(Gtk.Application):
             self.say_again_spinner.start()
         else:
             self.say_again_spinner.stop()
+
+    def check_system_dependencies(self, window):
+        missing = []
+        if not self.pick_mp3_players():
+            preferred = self.get_preferred_player_package()
+            if preferred:
+                missing.append(preferred)
+        if not missing:
+            return
+
+        command = self.format_install_command(missing)
+        detail = "Missing system packages: " + ", ".join(missing)
+        if command:
+            detail += f"\n\nInstall with:\n{command}"
+            detail += "\n\nAlternatives: ffmpeg (ffplay) or mpg123."
+        else:
+            detail += "\n\nInstall with your system package manager."
+
+        dialog = Gtk.AlertDialog()
+        dialog.set_message("Missing system dependencies")
+        dialog.set_detail(detail)
+        dialog.set_buttons(["Install", "Close"])
+        dialog.choose(window, None, self.on_dependency_dialog_response, command)
+
+    def format_install_command(self, packages):
+        distro = self.get_distro_id()
+        pkg_list = " ".join(packages)
+        if distro in {"ubuntu", "debian", "linuxmint", "pop"}:
+            return f"sudo apt install {pkg_list}"
+        if distro in {"fedora", "rhel", "centos"}:
+            return f"sudo dnf install {pkg_list}"
+        if distro in {"arch", "manjaro"}:
+            return f"sudo pacman -S {pkg_list}"
+        if distro in {"opensuse", "suse"}:
+            return f"sudo zypper install {pkg_list}"
+        return ""
+
+    def get_preferred_player_package(self):
+        distro = self.get_distro_id()
+        preferred = {
+            "ubuntu": "mpv",
+            "debian": "mpv",
+            "linuxmint": "mpv",
+            "pop": "mpv",
+            "fedora": "mpv",
+            "rhel": "mpv",
+            "centos": "mpv",
+            "arch": "mpv",
+            "manjaro": "mpv",
+            "opensuse": "mpv",
+            "suse": "mpv",
+        }
+        return preferred.get(distro, "mpv")
+
+    def on_dependency_dialog_response(self, dialog, response, command):
+        if response != 0 or not command:
+            return
+        if not self.run_privileged_command(command):
+            followup = Gtk.AlertDialog()
+            followup.set_message("Could not launch privileged installer")
+            followup.set_detail(
+                "Please run the install command manually in a terminal."
+            )
+            followup.show(self.get_active_window())
+
+    def run_privileged_command(self, command):
+        helpers = [
+            ("pkexec", ["pkexec", "sh", "-c", command]),
+            ("gksudo", ["gksudo", "sh", "-c", command]),
+            ("gksu", ["gksu", "sh", "-c", command]),
+            ("kdesudo", ["kdesudo", "sh", "-c", command]),
+        ]
+        for name, cmd in helpers:
+            if shutil.which(name):
+                try:
+                    subprocess.Popen(cmd)
+                    return True
+                except OSError:
+                    return False
+        return False
+
+    def get_distro_id(self):
+        os_release = Path("/etc/os-release")
+        if not os_release.exists():
+            return ""
+        try:
+            data = os_release.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return ""
+        for line in data.splitlines():
+            if line.startswith("ID="):
+                return line.split("=", 1)[1].strip().strip('"')
+        return ""
 
 
 def main():

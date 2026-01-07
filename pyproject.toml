@@ -15,3 +15,7 @@ spellingbee = "spellingbee:main"
 
 [tool.setuptools]
 py-modules = ["spellingbee"]
+include-package-data = true
+
+[tool.setuptools.data-files]
+"spellingbee_word_lists" = ["word_lists/*.txt"]
