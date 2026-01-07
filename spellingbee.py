@@ -25,11 +25,13 @@ class SpellingBeeApp(Gtk.Application):
         self.edge_voice = os.environ.get("EDGE_TTS_VOICE", "en-US-AriaNeural")
         self.recent_lists = []
         self.recent_path = self.get_config_path() / "recent_lists.json"
+        self.audio_cache = {}
+        self.audio_dir = tempfile.TemporaryDirectory()
 
     def do_activate(self):
         window = Gtk.ApplicationWindow(application=self)
         window.set_title("Spelling Bee")
-        window.set_default_size(520, 240)
+        window.set_default_size(520, -1)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         outer.set_margin_top(12)
@@ -197,27 +199,33 @@ class SpellingBeeApp(Gtk.Application):
 
         def run():
             with self.tts_lock:
-                GLib.idle_add(self.word_label.set_text, "Generating audio...")
+                GLib.idle_add(self.word_label.set_text, "Listen and type the spelling.")
                 try:
-                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
+                    cached_path = self.audio_cache.get(text)
+                    if cached_path and Path(cached_path).exists():
+                        ok = self.play_audio(mp3_players, cached_path)
+                    else:
+                        output_path = Path(self.audio_dir.name) / f"{len(self.audio_cache)}.mp3"
                         asyncio.run(
                             edge_tts.Communicate(
                                 f"Please spell: {text}", voice=self.edge_voice
-                            ).save(tmp.name)
+                            ).save(str(output_path))
                         )
-                        size = Path(tmp.name).stat().st_size
+                        size = output_path.stat().st_size
                         if size == 0:
                             GLib.idle_add(
                                 self.word_label.set_text,
                                 "TTS produced empty audio. Check network access.",
                             )
                             return
-                        ok = self.play_audio(mp3_players, tmp.name)
-                        if not ok:
-                            GLib.idle_add(
-                                self.word_label.set_text,
-                                "Audio playback failed. Check your sound device.",
-                            )
+                        self.audio_cache[text] = str(output_path)
+                        ok = self.play_audio(mp3_players, str(output_path))
+
+                    if not ok:
+                        GLib.idle_add(
+                            self.word_label.set_text,
+                            "Audio playback failed. Check your sound device.",
+                        )
                 except Exception as exc:
                     GLib.idle_add(
                         self.word_label.set_text,
