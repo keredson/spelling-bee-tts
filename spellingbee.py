@@ -5,6 +5,8 @@ import random
 import re
 import shutil
 import subprocess
+import site
+import sys
 import sysconfig
 import tempfile
 import threading
@@ -381,7 +383,10 @@ class SpellingBeeApp(Gtk.Application):
         candidates = [
             Path(__file__).resolve().parent / "word_lists",
             Path.cwd() / "word_lists",
-            Path(sysconfig.get_paths()["purelib"]) / "spellingbee_word_lists",
+            Path(sysconfig.get_paths()["data"]) / "spelling_bee_tts_word_lists",
+            Path(sysconfig.get_paths()["purelib"]) / "spelling_bee_tts_word_lists",
+            Path(site.USER_BASE) / "spelling_bee_tts_word_lists",
+            Path(sys.prefix) / "spelling_bee_tts_word_lists",
         ]
         for candidate in candidates:
             if candidate.exists() and list(candidate.glob("*.txt")):
@@ -527,7 +532,7 @@ class SpellingBeeApp(Gtk.Application):
 
 def main():
     app = SpellingBeeApp()
-    app.run(None)
+    app.run(sys.argv)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spelling-bee-tts"
-version = "0.1.1"
+version = "0.1.2"
 description = "GTK4 spelling quiz app with text-to-speech."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -18,6 +18,6 @@ py-modules = ["spellingbee"]
 include-package-data = true
 
 [tool.setuptools.data-files]
-"spellingbee_word_lists" = ["word_lists/*.txt"]
-"share/applications" = ["spellingbee.desktop"]
-"share/icons/hicolor/256x256/apps" = ["spellingbee.png"]
+"spelling_bee_tts_word_lists" = ["word_lists/*.txt"]
+"share/applications" = ["spelling-bee-tts.desktop"]
+"share/icons/hicolor/256x256/apps" = ["spelling-bee-tts.png"]

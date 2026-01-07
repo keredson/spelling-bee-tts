@@ -1,0 +1,3 @@
+include spelling-bee-tts.desktop
+include spelling-bee-tts.png
+recursive-include word_lists *.txt
