@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Spelling Bee TTS
+Comment=Spelling quiz with text-to-speech
+Exec=spellingbee
+Icon=spellingbee
+Terminal=false
+Categories=Education;Game;
