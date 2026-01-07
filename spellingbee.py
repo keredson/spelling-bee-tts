@@ -167,7 +167,7 @@ class SpellingBeeApp(Gtk.Application):
         self.current_word = random.choice(self.words)
         self.entry.set_text("")
         self.word_label.set_text("Listen and type the spelling.")
-        self.speak(self.current_word)
+        self.speak("Please spell: "+ self.current_word)
 
     def on_submit(self, _widget):
         if not self.current_word:
@@ -181,11 +181,16 @@ class SpellingBeeApp(Gtk.Application):
         if guess.lower() == self.current_word.lower():
             self.correct += 1
             self.word_label.set_text("Correct! Next word...")
+            self.speak("That is correct!", on_done=self.after_feedback)
         else:
             self.word_label.set_text(f"Incorrect. It was: {self.current_word}")
+            self.speak(
+                f"Sorry, that is not correct, the correct spelling is: {'. '.join(self.current_word)}"
+                ,
+                on_done=self.after_feedback,
+            )
 
         self.update_score()
-        GLib.timeout_add(900, self.after_feedback)
 
     def after_feedback(self):
         self.next_word()
@@ -198,7 +203,7 @@ class SpellingBeeApp(Gtk.Application):
     def update_score(self):
         self.score_label.set_text(f"Score: {self.correct}/{self.total}")
 
-    def speak(self, text):
+    def speak(self, text, on_done=None):
         mp3_players = self.pick_mp3_players()
         if not mp3_players:
             self.word_label.set_text("Install mpv/ffplay/mpg123 to play TTS audio.")
@@ -216,7 +221,7 @@ class SpellingBeeApp(Gtk.Application):
                         output_path = Path(self.audio_dir.name) / f"{len(self.audio_cache)}.mp3"
                         asyncio.run(
                             edge_tts.Communicate(
-                                f"Please spell: {text}", voice=self.edge_voice
+                                text, voice=self.edge_voice
                             ).save(str(output_path))
                         )
                         size = output_path.stat().st_size
@@ -248,6 +253,8 @@ class SpellingBeeApp(Gtk.Application):
                             "Listen and type the spelling.",
                         )
                     GLib.idle_add(self.set_say_again_busy, False)
+                    if on_done:
+                        GLib.idle_add(on_done)
 
         threading.Thread(target=run, daemon=True).start()
 
