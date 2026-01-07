@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spellingbee"
+version = "0.1.0"
+description = "GTK4 spelling quiz app with text-to-speech."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["edge-tts>=7.2.7"]
+
+[project.scripts]
+spellingbee = "spellingbee:main"
+
+[tool.setuptools]
+py-modules = ["spellingbee"]
