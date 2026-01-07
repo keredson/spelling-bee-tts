@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,9 +12,17 @@ from pathlib import Path
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk, GLib
+from gi.repository import Gio, GLib, GObject, Gtk
 
 import edge_tts
+
+
+class ListEntry(GObject.Object):
+    kind = GObject.Property(type=str)
+    label = GObject.Property(type=str)
+    path = GObject.Property(type=str)
+
+
 class SpellingBeeApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="com.example.SpellingBee")
@@ -45,12 +54,20 @@ class SpellingBeeApp(Gtk.Application):
         self.score_label = Gtk.Label(label="Score: 0/0")
         self.score_label.set_xalign(0.0)
 
-        self.recent_label = Gtk.Label(label="Recent word lists:")
-        self.recent_label.set_xalign(0.0)
+        self.list_store = Gio.ListStore.new(ListEntry)
+        self.list_selection = Gtk.NoSelection.new(self.list_store)
+        self.list_view = Gtk.ListView(
+            model=self.list_selection, factory=self.build_list_factory()
+        )
+        self.list_view.set_single_click_activate(True)
+        self.list_view.connect("activate", self.on_list_activate)
 
-        self.recent_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.list_scroller = Gtk.ScrolledWindow()
+        self.list_scroller.set_child(self.list_view)
+        self.list_scroller.set_vexpand(True)
+        self.list_scroller.set_min_content_height(220)
 
-        self.load_button = Gtk.Button(label="Choose Word List")
+        self.load_button = Gtk.Button(label="Add Word List")
         self.load_button.connect("clicked", self.on_choose_file, window)
 
         self.start_button = Gtk.Button(label="Start Game")
@@ -81,8 +98,7 @@ class SpellingBeeApp(Gtk.Application):
         self.button_row.append(self.say_again_button)
 
         outer.append(self.header)
-        outer.append(self.recent_label)
-        outer.append(self.recent_box)
+        outer.append(self.list_scroller)
         outer.append(self.load_button)
         outer.append(self.start_button)
         outer.append(self.word_label)
@@ -96,7 +112,7 @@ class SpellingBeeApp(Gtk.Application):
         self.score_label.set_visible(False)
 
         self.load_recent_lists()
-        self.refresh_recent_ui()
+        self.refresh_list_model()
 
         window.set_child(outer)
         window.present()
@@ -142,10 +158,9 @@ class SpellingBeeApp(Gtk.Application):
         self.total = 0
         self.update_score()
         self.remember_recent_list(path)
+        self.list_scroller.set_visible(False)
         self.load_button.set_visible(False)
         self.header.set_visible(False)
-        self.recent_label.set_visible(False)
-        self.recent_box.set_visible(False)
         self.start_button.set_visible(True)
         self.word_label.set_text("Ready when you are.")
 
@@ -281,58 +296,80 @@ class SpellingBeeApp(Gtk.Application):
             )
         except OSError:
             pass
-        self.refresh_recent_ui()
+        self.refresh_list_model()
 
-    def refresh_recent_ui(self):
-        while child := self.recent_box.get_first_child():
-            self.recent_box.remove(child)
+    def refresh_list_model(self):
+        while self.list_store.get_n_items():
+            self.list_store.remove(0)
+
+        def append(kind, label, path=""):
+            self.list_store.append(ListEntry(kind=kind, label=label, path=path))
 
         existing = []
         for path_str in self.recent_lists:
-            path = Path(path_str)
-            if path.exists():
+            if Path(path_str).exists():
                 existing.append(path_str)
+        self.recent_lists = existing[:10]
 
-        self.recent_lists = existing
+        append("header", "Recent")
+        if self.recent_lists:
+            for path_str in self.recent_lists:
+                display = Path(path_str).stem
+                append("item", display, path_str)
+        else:
+            append("empty", "No recent lists yet.")
 
-        if not self.recent_lists:
-            self.recent_label.set_visible(False)
-            self.recent_box.set_visible(False)
+        append("header", "Built-in")
+        builtin_dir = Path("word_lists")
+        builtin_paths = sorted(
+            builtin_dir.glob("*.txt"), key=lambda p: self.natural_key(p.stem)
+        )
+        if builtin_paths:
+            for path in builtin_paths:
+                append("item", path.stem, str(path))
+        else:
+            append("empty", "No built-in lists found.")
+
+    def build_list_factory(self):
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self.on_list_setup)
+        factory.connect("bind", self.on_list_bind)
+        return factory
+
+    def on_list_setup(self, _factory, list_item):
+        label = Gtk.Label(xalign=0.0)
+        label.set_wrap(True)
+        label.set_selectable(False)
+        list_item.set_child(label)
+
+    def on_list_bind(self, _factory, list_item):
+        entry = list_item.get_item()
+        label = list_item.get_child()
+        label.set_css_classes([])
+        label.set_margin_top(4)
+        label.set_margin_bottom(4)
+
+        if entry.kind == "header":
+            label.set_use_markup(True)
+            label.set_markup(f"<b>{entry.label}</b>")
+            label.set_margin_top(12)
+            label.set_margin_bottom(6)
+        elif entry.kind == "empty":
+            label.set_use_markup(False)
+            label.set_text(entry.label)
+            label.add_css_class("dim-label")
+        else:
+            label.set_use_markup(False)
+            label.set_text(entry.label)
+    def on_list_activate(self, _list_view, position):
+        entry = self.list_store.get_item(position)
+        if not entry or entry.kind != "item":
             return
+        self.load_words(Path(entry.path))
 
-        self.recent_label.set_visible(True)
-        self.recent_box.set_visible(True)
-        for path_str in self.recent_lists:
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            button = Gtk.Button(label=path_str)
-            button.set_halign(Gtk.Align.START)
-            button.set_hexpand(True)
-            #button.set_has_frame(False)
-            button.connect("clicked", self.on_recent_clicked, path_str)
-            remove_button = Gtk.Button()
-            remove_icon = Gtk.Image.new_from_icon_name("window-close-symbolic")
-            remove_button.set_child(remove_icon)
-            remove_button.set_tooltip_text("Remove")
-            remove_button.set_has_frame(False)
-            remove_button.connect("clicked", self.on_recent_remove, path_str)
-            row.append(button)
-            row.append(remove_button)
-            self.recent_box.append(row)
-
-    def on_recent_clicked(self, _button, path_str):
-        self.load_words(Path(path_str))
-
-    def on_recent_remove(self, _button, path_str):
-        self.recent_lists = [p for p in self.recent_lists if p != path_str]
-        try:
-            self.recent_path.parent.mkdir(parents=True, exist_ok=True)
-            self.recent_path.write_text(
-                json.dumps(self.recent_lists, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-        self.refresh_recent_ui()
+    def natural_key(self, text):
+        parts = re.split(r"(\\d+)", text.lower())
+        return [int(part) if part.isdigit() else part for part in parts]
 
     def get_config_path(self):
         config_home = os.environ.get("XDG_CONFIG_HOME")
