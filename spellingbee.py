@@ -66,8 +66,15 @@ class SpellingBeeApp(Gtk.Application):
         self.submit_button = Gtk.Button(label="Submit")
         self.submit_button.connect("clicked", self.on_submit)
 
-        self.say_again_button = Gtk.Button(label="Say Again")
+        self.say_again_button = Gtk.Button()
         self.say_again_button.connect("clicked", self.on_say_again)
+        self.say_again_label = Gtk.Label(label="Say Again")
+        self.say_again_spinner = Gtk.Spinner()
+        self.say_again_spinner.set_visible(False)
+        say_again_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        say_again_box.append(self.say_again_label)
+        say_again_box.append(self.say_again_spinner)
+        self.say_again_button.set_child(say_again_box)
 
         self.button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.button_row.append(self.submit_button)
@@ -199,7 +206,8 @@ class SpellingBeeApp(Gtk.Application):
 
         def run():
             with self.tts_lock:
-                GLib.idle_add(self.word_label.set_text, "Listen and type the spelling.")
+                GLib.idle_add(self.set_say_again_busy, True)
+                success = False
                 try:
                     cached_path = self.audio_cache.get(text)
                     if cached_path and Path(cached_path).exists():
@@ -226,11 +234,20 @@ class SpellingBeeApp(Gtk.Application):
                             self.word_label.set_text,
                             "Audio playback failed. Check your sound device.",
                         )
+                    else:
+                        success = True
                 except Exception as exc:
                     GLib.idle_add(
                         self.word_label.set_text,
                         f"TTS failed: {exc}",
                     )
+                finally:
+                    if success:
+                        GLib.idle_add(
+                            self.word_label.set_text,
+                            "Listen and type the spelling.",
+                        )
+                    GLib.idle_add(self.set_say_again_busy, False)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -315,6 +332,15 @@ class SpellingBeeApp(Gtk.Application):
             if result.returncode == 0:
                 return True
         return False
+
+    def set_say_again_busy(self, busy):
+        self.say_again_button.set_sensitive(not busy)
+        self.say_again_spinner.set_visible(busy)
+        self.say_again_label.set_text("Speaking..." if busy else "Say Again")
+        if busy:
+            self.say_again_spinner.start()
+        else:
+            self.say_again_spinner.stop()
 
 
 def main():
