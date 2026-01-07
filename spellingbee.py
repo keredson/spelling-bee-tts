@@ -368,7 +368,7 @@ class SpellingBeeApp(Gtk.Application):
         self.load_words(Path(entry.path))
 
     def natural_key(self, text):
-        parts = re.split(r"(\\d+)", text.lower())
+        parts = re.split(r"(\d+)", text.lower())
         return [int(part) if part.isdigit() else part for part in parts]
 
     def get_config_path(self):
