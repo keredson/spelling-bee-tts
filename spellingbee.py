@@ -296,13 +296,36 @@ class SpellingBeeApp(Gtk.Application):
         self.recent_label.set_visible(True)
         self.recent_box.set_visible(True)
         for path_str in self.recent_lists:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
             button = Gtk.Button(label=path_str)
             button.set_halign(Gtk.Align.START)
+            button.set_hexpand(True)
+            #button.set_has_frame(False)
             button.connect("clicked", self.on_recent_clicked, path_str)
-            self.recent_box.append(button)
+            remove_button = Gtk.Button()
+            remove_icon = Gtk.Image.new_from_icon_name("window-close-symbolic")
+            remove_button.set_child(remove_icon)
+            remove_button.set_tooltip_text("Remove")
+            remove_button.set_has_frame(False)
+            remove_button.connect("clicked", self.on_recent_remove, path_str)
+            row.append(button)
+            row.append(remove_button)
+            self.recent_box.append(row)
 
     def on_recent_clicked(self, _button, path_str):
         self.load_words(Path(path_str))
+
+    def on_recent_remove(self, _button, path_str):
+        self.recent_lists = [p for p in self.recent_lists if p != path_str]
+        try:
+            self.recent_path.parent.mkdir(parents=True, exist_ok=True)
+            self.recent_path.write_text(
+                json.dumps(self.recent_lists, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        self.refresh_recent_ui()
 
     def get_config_path(self):
         config_home = os.environ.get("XDG_CONFIG_HOME")
