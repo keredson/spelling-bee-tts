@@ -24,3 +24,7 @@ python3 -m spellingbee
 Notes:
 - `edge-tts` requires network access.
 - You can override the voice with `EDGE_TTS_VOICE` (default: `en-US-AriaNeural`).
+- Offline sentence generation uses `llama-cpp-python` with a local GGUF model.
+  - By default, the app prompts to download Qwen2.5-1.5B-Instruct Q8_0 into the Hugging Face cache on first use.
+  - Override with `LLM_REPO_ID` or `LLM_MODEL_PATH`.
+  - Optional tuning: `LLM_N_CTX`, `LLM_THREADS`, `LLM_N_BATCH`, `LLM_TEMPERATURE`, `LLM_TOP_P`.

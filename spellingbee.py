@@ -10,6 +10,9 @@ import sys
 import sysconfig
 import tempfile
 import threading
+import time
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import gi
@@ -28,7 +31,8 @@ class ListEntry(GObject.Object):
 
 class SpellingBeeApp(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="com.example.SpellingBee")
+        super().__init__(application_id="org.pypi.project.spelling-bee-tts")
+        GLib.set_application_name("Spelling Bee TTS")
         self.words = []
         self.current_word = None
         self.correct = 0
@@ -37,13 +41,25 @@ class SpellingBeeApp(Gtk.Application):
         self.edge_voice = os.environ.get("EDGE_TTS_VOICE", "en-US-AriaNeural")
         self.recent_lists = []
         self.recent_path = self.get_config_path() / "recent_lists.json"
+        self.settings_path = self.get_config_path() / "settings.json"
         self.audio_cache = {}
         self.audio_dir = tempfile.TemporaryDirectory()
+        self.llm = None
+        self.llm_lock = threading.Lock()
+        self.llm_model_repo = os.environ.get(
+            "LLM_REPO_ID", "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+        )
+        self.llm_model_filename = "qwen2.5-1.5b-instruct-q8_0.gguf"
+        self.llm_model_path = None
+        self.current_sentence = None
+        self._sentence_generation_id = 0
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Spelling Bee")
+        version = self.get_current_version() or "dev"
+        self.window.set_title(f"Spelling Bee TTS  v{version}")
         self.window.set_default_size(520, -1)
+        self.window.connect("close-request", self.on_close_request)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         outer.set_margin_top(12)
@@ -73,9 +89,6 @@ class SpellingBeeApp(Gtk.Application):
         self.load_button = Gtk.Button(label="Add Word List")
         self.load_button.connect("clicked", self.on_choose_file, self.window)
 
-        self.start_button = Gtk.Button(label="Start Game")
-        self.start_button.connect("clicked", self.on_start_game)
-
         self.word_label = Gtk.Label(label="")
         self.word_label.set_xalign(0.0)
 
@@ -96,20 +109,29 @@ class SpellingBeeApp(Gtk.Application):
         say_again_box.append(self.say_again_spinner)
         self.say_again_button.set_child(say_again_box)
 
+        self.sentence_button = Gtk.Button()
+        self.sentence_button.connect("clicked", self.on_use_sentence)
+        self.sentence_label = Gtk.Label(label="Use in a Sentence")
+        self.sentence_spinner = Gtk.Spinner()
+        self.sentence_spinner.set_visible(False)
+        sentence_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        sentence_box.append(self.sentence_label)
+        sentence_box.append(self.sentence_spinner)
+        self.sentence_button.set_child(sentence_box)
+
         self.button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.button_row.append(self.submit_button)
         self.button_row.append(self.say_again_button)
+        self.button_row.append(self.sentence_button)
 
         outer.append(self.header)
         outer.append(self.list_scroller)
         outer.append(self.load_button)
-        outer.append(self.start_button)
         outer.append(self.word_label)
         outer.append(self.entry)
         outer.append(self.button_row)
         outer.append(self.score_label)
 
-        self.start_button.set_visible(False)
         self.entry.set_visible(False)
         self.button_row.set_visible(False)
         self.score_label.set_visible(False)
@@ -120,6 +142,7 @@ class SpellingBeeApp(Gtk.Application):
         self.window.set_child(outer)
         self.window.present()
         self.check_system_dependencies(self.window)
+        self.maybe_check_for_updates()
 
     def on_choose_file(self, _button, window):
         dialog = Gtk.FileChooserNative(
@@ -131,6 +154,10 @@ class SpellingBeeApp(Gtk.Application):
         )
         dialog.connect("response", self.on_file_response)
         dialog.show()
+
+    def on_close_request(self, _window):
+        self.quit()
+        return False
 
     def on_file_response(self, dialog, response):
         if response == Gtk.ResponseType.ACCEPT:
@@ -165,14 +192,6 @@ class SpellingBeeApp(Gtk.Application):
         self.list_scroller.set_visible(False)
         self.load_button.set_visible(False)
         self.header.set_visible(False)
-        self.start_button.set_visible(True)
-        self.word_label.set_text("Ready when you are.")
-        self.update_window_height()
-
-    def on_start_game(self, _button):
-        if not self.words:
-            return
-        self.start_button.set_visible(False)
         self.entry.set_visible(True)
         self.button_row.set_visible(True)
         self.score_label.set_visible(True)
@@ -186,10 +205,12 @@ class SpellingBeeApp(Gtk.Application):
             return
 
         self.current_word = random.choice(self.words)
+        self.current_sentence = None
         self.entry.set_text("")
         self.word_label.set_text("Listen and type the spelling.")
         self.entry.grab_focus()
-        self.speak("Please spell: "+ self.current_word)
+        self.speak("Please spell: " + self.current_word)
+        self.prefetch_sentence(self.current_word, allow_download=False)
 
     def on_submit(self, _widget):
         if not self.current_word:
@@ -223,10 +244,20 @@ class SpellingBeeApp(Gtk.Application):
             self.speak(self.current_word)
             self.entry.grab_focus()
 
+    def on_use_sentence(self, _button):
+        if not self.current_word:
+            return
+
+        if self.current_sentence:
+            self.speak(self.current_sentence, reset_label=False)
+            self.entry.grab_focus()
+            return
+        self.prefetch_sentence(self.current_word, allow_download=True)
+
     def update_score(self):
         self.score_label.set_text(f"Score: {self.correct}/{self.total}")
 
-    def speak(self, text, on_done=None):
+    def speak(self, text, on_done=None, reset_label=True):
         mp3_players = self.pick_mp3_players()
         if not mp3_players:
             self.word_label.set_text("Install mpv/ffplay/mpg123 to play TTS audio.")
@@ -270,7 +301,7 @@ class SpellingBeeApp(Gtk.Application):
                         f"TTS failed: {exc}",
                     )
                 finally:
-                    if success:
+                    if success and reset_label:
                         GLib.idle_add(
                             self.word_label.set_text,
                             "Listen and type the spelling.",
@@ -433,10 +464,407 @@ class SpellingBeeApp(Gtk.Application):
         else:
             self.say_again_spinner.stop()
 
+    def set_sentence_busy(self, busy):
+        self.sentence_button.set_sensitive(not busy)
+        self.sentence_spinner.set_visible(busy)
+        self.sentence_label.set_text("Generating..." if busy else "Use in a Sentence")
+        if busy:
+            self.sentence_spinner.start()
+        else:
+            self.sentence_spinner.stop()
+
+    def get_llm(self):
+        if self.llm:
+            return self.llm
+        model_path = os.environ.get("LLM_MODEL_PATH", "").strip()
+        try:
+            from llama_cpp import Llama
+        except Exception as exc:
+            raise RuntimeError("Install llama-cpp-python to enable LLM output.") from exc
+        if not model_path:
+            model_path = self.ensure_model_path()
+        n_ctx = int(os.environ.get("LLM_N_CTX", "2048"))
+        n_threads = int(
+            os.environ.get("LLM_THREADS", str(max(1, os.cpu_count() or 1)))
+        )
+        n_batch = int(os.environ.get("LLM_N_BATCH", "256"))
+        self.llm = Llama(
+            model_path=model_path,
+            n_ctx=n_ctx,
+            n_threads=n_threads,
+            n_batch=n_batch,
+        )
+        return self.llm
+
+    def ensure_model_path(self):
+        if self.llm_model_path:
+            return self.llm_model_path
+        try:
+            from huggingface_hub import hf_hub_download
+            from huggingface_hub.utils import LocalEntryNotFoundError
+            from huggingface_hub.constants import HF_HUB_CACHE
+            from huggingface_hub.file_download import repo_folder_name
+        except Exception as exc:
+            raise RuntimeError(
+                "Install huggingface_hub to auto-download the GGUF model."
+            ) from exc
+
+        cached_path = self.get_cached_model_path()
+        if cached_path:
+            self.llm_model_path = cached_path
+            return self.llm_model_path
+
+        size_text, expected_size = self.get_model_download_size()
+        if not self.confirm_model_download(size_text):
+            raise RuntimeError("Model download canceled.")
+
+        repo_dir = (
+            Path(HF_HUB_CACHE)
+            / repo_folder_name(repo_id=self.llm_model_repo, repo_type="model")
+        )
+        progress = self.show_download_progress(size_text, expected_size, repo_dir)
+        try:
+            self.llm_model_path = hf_hub_download(
+                repo_id=self.llm_model_repo,
+                filename=self.llm_model_filename,
+            )
+            return self.llm_model_path
+        finally:
+            self.close_download_progress(progress)
+
+    def get_cached_model_path(self):
+        try:
+            from huggingface_hub import hf_hub_download
+            from huggingface_hub.utils import LocalEntryNotFoundError
+        except Exception:
+            return None
+        try:
+            return hf_hub_download(
+                repo_id=self.llm_model_repo,
+                filename=self.llm_model_filename,
+                local_files_only=True,
+            )
+        except LocalEntryNotFoundError:
+            return None
+        except Exception:
+            return None
+
+    def get_model_download_size(self):
+        try:
+            from huggingface_hub import hf_hub_url, get_hf_file_metadata
+        except Exception:
+            return "", None
+        try:
+            url = hf_hub_url(self.llm_model_repo, filename=self.llm_model_filename)
+            metadata = get_hf_file_metadata(url)
+            size = getattr(metadata, "size", 0)
+        except Exception:
+            return "", None
+        if not size:
+            return "", None
+        return self.format_size(size), size
+
+    def format_size(self, size):
+        units = ["B", "KB", "MB", "GB", "TB"]
+        value = float(size)
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                return f"{value:.1f} {unit}"
+            value /= 1024
+        return f"{value:.1f} TB"
+
+    def confirm_model_download(self, size_text):
+        event = threading.Event()
+        result = {"approved": False}
+        detail = "Download the sentence model now?"
+        if size_text:
+            detail = f"Download the sentence model now?\n\nApprox size: {size_text}"
+
+        def on_response(dialog, async_result, _data=None):
+            try:
+                response = dialog.choose_finish(async_result)
+            except Exception:
+                response = -1
+            result["approved"] = response == 0
+            event.set()
+
+        def show_dialog():
+            dialog = Gtk.AlertDialog()
+            dialog.set_message("Download model")
+            dialog.set_detail(detail)
+            dialog.set_buttons(["Download", "Cancel"])
+            dialog.choose(self.window, None, on_response, None)
+            return False
+
+        GLib.idle_add(show_dialog)
+        event.wait()
+        return result["approved"]
+
+    def show_download_progress(self, size_text, expected_size, repo_dir):
+        event = threading.Event()
+        state = {}
+        title = "Downloading sentence model"
+        if size_text:
+            title = f"Downloading sentence model ({size_text})"
+
+        def show_window():
+            window = Gtk.Window(transient_for=self.window, modal=True, title="Download")
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.set_margin_top(12)
+            box.set_margin_bottom(12)
+            box.set_margin_start(12)
+            box.set_margin_end(12)
+            label = Gtk.Label(label=title)
+            label.set_xalign(0.0)
+            bar = Gtk.ProgressBar()
+            bar.set_show_text(True)
+            bar.set_text("Downloading...")
+            box.append(label)
+            box.append(bar)
+            window.set_child(box)
+            window.set_default_size(360, -1)
+            window.present()
+            state["window"] = window
+            state["bar"] = bar
+            event.set()
+            return False
+
+        GLib.idle_add(show_window)
+        event.wait()
+
+        def update_progress():
+            bar = state.get("bar")
+            if not bar:
+                return False
+            if expected_size:
+                current_size = self.get_incomplete_download_size(repo_dir)
+                if current_size is not None:
+                    fraction = min(1.0, current_size / expected_size)
+                    bar.set_fraction(fraction)
+                    bar.set_text(
+                        f"{self.format_size(current_size)} / {self.format_size(expected_size)}"
+                    )
+                else:
+                    bar.pulse()
+            else:
+                bar.pulse()
+            return True
+
+        state["pulse_id"] = GLib.timeout_add(200, update_progress)
+        return state
+
+    def get_incomplete_download_size(self, repo_dir):
+        blobs_dir = Path(repo_dir) / "blobs"
+        if not blobs_dir.exists():
+            return None
+        latest_path = None
+        latest_mtime = 0
+        for path in blobs_dir.glob("*.incomplete"):
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime >= latest_mtime:
+                latest_mtime = mtime
+                latest_path = path
+        if not latest_path:
+            return None
+        try:
+            return latest_path.stat().st_size
+        except OSError:
+            return None
+
+    def close_download_progress(self, state):
+        def close():
+            pulse_id = state.get("pulse_id")
+            if pulse_id:
+                GLib.source_remove(pulse_id)
+            window = state.get("window")
+            if window:
+                window.close()
+            return False
+
+        GLib.idle_add(close)
+
+    def generate_sentence(self, word):
+        print('generate_sentence', word)
+        llm = self.get_llm()
+        prompt = (
+            'You are an announcer in a spelling bee competition. '
+            'Your task is to create a single example sentence that uses the given word exactly in context. '
+            'Do not output instructions, only the sentence. '
+            'Use the word exactly as spelled. '
+            'Keep the sentence concise and clear.'
+            f'Use the word "{word}" in a meaningful sentence.\n\n'
+        )
+        print('prompt', prompt)
+        result = llm(
+            prompt,
+            max_tokens=64,
+            temperature=float(os.environ.get("LLM_TEMPERATURE", "0.7")),
+            top_p=float(os.environ.get("LLM_TOP_P", "0.9")),
+            stop=["\n"],
+        )
+        print('result', result)
+        text = (result.get("choices") or [{}])[0].get("text", "").strip()
+        print(text)
+        return text
+
+    def prefetch_sentence(self, word, allow_download):
+        if not allow_download and not self.get_cached_model_path():
+            return
+        self._sentence_generation_id += 1
+        generation_id = self._sentence_generation_id
+
+        def run():
+            with self.llm_lock:
+                GLib.idle_add(self.set_sentence_busy, True)
+                try:
+                    sentence = self.generate_sentence(word)
+                    if not sentence:
+                        GLib.idle_add(
+                            self.show_error_dialog,
+                            "Sentence generation failed",
+                            "Sentence generation returned no text.",
+                        )
+                        return
+                    if self.current_word == word:
+                        self.current_sentence = sentence
+                except Exception as exc:
+                    GLib.idle_add(
+                        self.show_error_dialog,
+                        "Sentence generation failed",
+                        str(exc),
+                    )
+                finally:
+                    if generation_id == self._sentence_generation_id:
+                        GLib.idle_add(self.set_sentence_busy, False)
+                    GLib.idle_add(self.ensure_entry_focus)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def ensure_entry_focus(self):
+        if not self.entry.has_focus():
+            self.entry.grab_focus()
+
     def update_window_height(self):
         if not getattr(self, "window", None):
             return
         self.window.set_default_size(520, -1)
+
+    def maybe_check_for_updates(self):
+        settings = self.load_settings()
+        last_check = settings.get("last_update_check", 0)
+        now = int(time.time())
+        if now - last_check < 7 * 24 * 60 * 60:
+            return
+        settings["last_update_check"] = now
+        self.save_settings(settings)
+
+        def run():
+            latest = self.fetch_latest_version()
+            current = self.get_current_version()
+            if not latest or not current:
+                return
+            if self.compare_versions(latest, current) <= 0:
+                return
+            GLib.idle_add(self.prompt_update, current, latest)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def prompt_update(self, current, latest):
+        dialog = Gtk.AlertDialog()
+        dialog.set_message("Update available")
+        dialog.set_detail(
+            f"A newer version is available.\n\nCurrent: {current}\nLatest: {latest}\n\nUpgrade now?"
+        )
+        dialog.set_buttons(["Upgrade", "Later"])
+        dialog.choose(self.window, None, self.on_update_response)
+
+    def on_update_response(self, _dialog, response):
+        if response != 0:
+            return
+        self.run_upgrade()
+
+    def run_upgrade(self):
+        def run():
+            cmd = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--user",
+                "--upgrade",
+                "spelling-bee-tts",
+            ]
+            result = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode == 0:
+                message = "Upgrade complete. Please restart the app."
+            else:
+                message = "Upgrade failed. Please try again in a terminal."
+            GLib.idle_add(self.show_info_dialog, message)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def show_info_dialog(self, message):
+        dialog = Gtk.AlertDialog()
+        dialog.set_message("Spelling Bee")
+        dialog.set_detail(message)
+        dialog.show(self.window)
+
+    def show_error_dialog(self, title, detail):
+        dialog = Gtk.AlertDialog()
+        dialog.set_message(title)
+        dialog.set_detail(detail)
+        dialog.show(self.window)
+
+    def fetch_latest_version(self):
+        url = "https://pypi.org/pypi/spelling-bee-tts/json"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            return data.get("info", {}).get("version", "")
+        except Exception:
+            return ""
+
+    def get_current_version(self):
+        try:
+            import importlib.metadata as metadata
+        except Exception:
+            return ""
+        try:
+            return metadata.version("spelling-bee-tts")
+        except metadata.PackageNotFoundError:
+            return ""
+
+    def compare_versions(self, a, b):
+        def parts(version):
+            out = []
+            for chunk in re.split(r"[.-]", version):
+                if chunk.isdigit():
+                    out.append(int(chunk))
+                else:
+                    out.append(chunk)
+            return out
+
+        a_parts = parts(a)
+        b_parts = parts(b)
+        return (a_parts > b_parts) - (a_parts < b_parts)
+
+    def load_settings(self):
+        if not self.settings_path.exists():
+            return {}
+        try:
+            return json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def save_settings(self, data):
+        try:
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self.settings_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
     def check_system_dependencies(self, window):
         missing = []
