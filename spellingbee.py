@@ -511,6 +511,7 @@ class SpellingBeeApp(Gtk.Application):
 
     def set_say_again_busy(self, busy):
         self.say_again_button.set_sensitive(not busy)
+        self.sentence_button.set_sensitive(not busy)
         self.say_again_spinner.set_visible(busy)
         self.say_again_label.set_text("Speaking..." if busy else "Say Again")
         if busy:
@@ -761,7 +762,7 @@ class SpellingBeeApp(Gtk.Application):
         result = llm(
             prompt,
             max_tokens=64,
-            temperature=float(os.environ.get("LLM_TEMPERATURE", "0.7")),
+            temperature=float(os.environ.get("LLM_TEMPERATURE", "0.9")),
             top_p=float(os.environ.get("LLM_TOP_P", "0.9")),
             stop=["\n"],
         )
@@ -774,79 +775,114 @@ class SpellingBeeApp(Gtk.Application):
         llm = self.get_llm()
         prompt = (
             f"Task: Generate 50 academic vocabulary words for {description}.\n"
+            #'Structure: Provide 5 words for each of these 10 categories: Science, Literature, History, Emotions, Technology, Law, Arts, Travel, Health, and Logic.'
             f'Use words found in standard {description} textbooks and literature.\n'
             'Do not use obscure spelling bee words.\n'
+            'Use distinct words with different roots and meanings.\n'
             f"Do not use proper nouns, abbreviations, symbols, numbers or hyphens.\n"
             f"Output one word per line. Each word must be unique.\n"
             'Do not include any explanations or additional text.\n'
         )
-        chunks = []
-        buffer = ""
-        last_word = ""
-        repeat_word = None
-        repeat_count = 0
-        for chunk in llm(
+        stream = llm(
             prompt,
             max_tokens=512,
-            temperature=float(os.environ.get("LLM_TEMPERATURE", "0.7")),
+            temperature=float(os.environ.get("LLM_TEMPERATURE", "0.9")),
             top_p=float(os.environ.get("LLM_TOP_P", "0.9")),
             stop=["\n\n"],
             stream=True,
-        ):
+        )
+        words = set()
+        for word in self.iter_words_from_stream(stream, cancel_event, progress):
+            words.add(word)
+        return sorted(words)
+
+    def iter_words_from_stream(self, stream, cancel_event, progress):
+        buffer = ""
+        unique_words = set()
+        total_words = 0
+
+        for chunk in stream:
             if cancel_event.is_set():
-                return None
+                return
             text_piece = (chunk.get("choices") or [{}])[0].get("text", "")
-            if text_piece:
-                sys.stdout.write(text_piece)
-                sys.stdout.flush()
-                buffer += text_piece
-                if "\n" in buffer:
-                    parts = buffer.split("\n")
-                    if buffer.endswith("\n"):
-                        candidate = parts[-2]
-                    else:
-                        candidate = parts[-2]
-                    cleaned = re.sub(r"[^A-Za-z]+", "", candidate).lower()
-                    if cleaned:
-                        last_word = cleaned
-                        if last_word == repeat_word:
-                            repeat_count += 1
-                        else:
-                            repeat_word = last_word
-                            repeat_count = 1
-                        if repeat_count > 5:
-                            raise RuntimeError(
-                                f"Generation stalled repeating '{repeat_word}'."
-                            )
-                        if progress:
-                            GLib.idle_add(
-                                self.update_generate_list_progress,
-                                progress,
-                                last_word,
-                            )
-                chunks.append(text_piece)
-        text = "".join(chunks).strip()
-        return self.parse_word_list(text)
+            if not text_piece:
+                continue
+            sys.stdout.write(text_piece)
+            sys.stdout.flush()
+            buffer += text_piece
+            for word in self.consume_word_buffer(buffer):
+                if cancel_event.is_set():
+                    return
+                total_words += 1
+                if total_words >= 20:
+                    unique_ratio = len(unique_words) / total_words
+                    if unique_ratio < 0.2:
+                        print(
+                            f"generation repeat guard: unique={len(unique_words)} total={total_words}"
+                        )
+                        raise RuntimeError(
+                            "Generation stalled with too many repeated words."
+                        )
+                unique_words.add(word)
+                if progress:
+                    GLib.idle_add(
+                        self.update_generate_list_progress,
+                        progress,
+                        word,
+                    )
+                yield word
+            buffer = self.trim_word_buffer(buffer)
+
+        tail = self.normalize_word(buffer)
+        if tail:
+            if progress:
+                GLib.idle_add(
+                    self.update_generate_list_progress,
+                    progress,
+                    tail,
+                )
+            yield tail
+
+    def consume_word_buffer(self, buffer):
+        if "\n" not in buffer and "," not in buffer:
+            return []
+        parts = re.split(r"[,\n]", buffer)
+        parts.pop()
+        out = []
+        for candidate in parts:
+            cleaned = self.normalize_word(candidate)
+            if cleaned:
+                out.append(cleaned)
+        return out
+
+    def trim_word_buffer(self, buffer):
+        if "\n" not in buffer and "," not in buffer:
+            return buffer
+        parts = re.split(r"[,\n]", buffer)
+        return parts[-1]
 
     def parse_word_list(self, text):
         words = set()
-        for raw in text.split():
-            cleaned = re.sub(r"[^A-Za-z]+", "", raw).lower()
+        for raw in re.split(r"[\s,]+", text):
+            cleaned = self.normalize_word(raw)
             if cleaned:
                 words.add(cleaned)
         words = sorted(words)
         print('generated', words)
         return words
 
+    def normalize_word(self, text):
+        return re.sub(r"[^A-Za-z]+", "", text).lower()
+
     def save_generated_word_list(self, description, words):
         safe = re.sub(r"[^a-zA-Z0-9 -]+", "", description.strip())
         safe = re.sub(r"\s+", " ", safe).strip()[:40]
         if not safe:
             safe = "generated"
-        timestamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+        timestamp = datetime.now().strftime("%Y-%m-%d %I.%M.%S %p")
         directory = self.get_config_path() / "generated_lists"
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{safe}-{timestamp}.txt"
+        path = directory / f"{safe} - {timestamp}.txt"
         path.write_text("\n".join(words) + "\n", encoding="utf-8")
         return path
 
@@ -917,6 +953,7 @@ class SpellingBeeApp(Gtk.Application):
             bar = Gtk.ProgressBar()
             bar.set_show_text(True)
             bar.set_text("Working...")
+            bar.set_margin_top(4)
             bar.pulse()
             cancel_button = Gtk.Button(label="Cancel")
             cancel_button.connect(
