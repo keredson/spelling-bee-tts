@@ -46,10 +46,11 @@ class SpellingBeeApp(Gtk.Application):
         self.audio_dir = tempfile.TemporaryDirectory()
         self.llm = None
         self.llm_lock = threading.Lock()
+        # "LLM_REPO_ID", "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
         self.llm_model_repo = os.environ.get(
-            "LLM_REPO_ID", "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+            "LLM_REPO_ID", "unsloth/Qwen3-4B-Instruct-2507-GGUF"
         )
-        self.llm_model_filename = "qwen2.5-1.5b-instruct-q8_0.gguf"
+        self.llm_model_filename = "Qwen3-4B-Instruct-2507-Q8_0.gguf"
         self.llm_model_path = None
         self.current_sentence = None
         self._sentence_generation_id = 0
@@ -86,8 +87,17 @@ class SpellingBeeApp(Gtk.Application):
         self.list_scroller.set_vexpand(True)
         self.list_scroller.set_min_content_height(220)
 
-        self.load_button = Gtk.Button(label="Add Word List")
+        self.load_button = Gtk.Button(label="Import Word List")
         self.load_button.connect("clicked", self.on_choose_file, self.window)
+        self.generate_list_button = Gtk.Button(label="Generate Word List")
+        self.generate_list_button.connect("clicked", self.on_generate_word_list)
+
+        self.list_button_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=8
+        )
+        self.list_button_row.set_halign(Gtk.Align.CENTER)
+        self.list_button_row.append(self.load_button)
+        self.list_button_row.append(self.generate_list_button)
 
         self.word_label = Gtk.Label(label="")
         self.word_label.set_xalign(0.0)
@@ -120,13 +130,14 @@ class SpellingBeeApp(Gtk.Application):
         self.sentence_button.set_child(sentence_box)
 
         self.button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.button_row.set_halign(Gtk.Align.CENTER)
         self.button_row.append(self.submit_button)
         self.button_row.append(self.say_again_button)
         self.button_row.append(self.sentence_button)
 
         outer.append(self.header)
         outer.append(self.list_scroller)
-        outer.append(self.load_button)
+        outer.append(self.list_button_row)
         outer.append(self.word_label)
         outer.append(self.entry)
         outer.append(self.button_row)
@@ -167,6 +178,42 @@ class SpellingBeeApp(Gtk.Application):
                 self.load_words(path)
         dialog.destroy()
 
+    def on_generate_word_list(self, _button):
+        self.prompt_word_list_description(self.on_word_list_description)
+
+    def on_word_list_description(self, description):
+        if not description:
+            return
+
+        cancel_event = threading.Event()
+        progress = self.show_generate_list_progress(cancel_event)
+
+        def run():
+            GLib.idle_add(self.set_generate_list_busy, True)
+            try:
+                if cancel_event.is_set():
+                    return
+                words = self.generate_word_list(description, cancel_event, progress)
+                if cancel_event.is_set() or words is None:
+                    return
+                if len(words) < 10:
+                    raise RuntimeError(
+                        "Generated list was too short. Try a different prompt."
+                    )
+                path = self.save_generated_word_list(description, words)
+                GLib.idle_add(self.load_words, path)
+            except Exception as exc:
+                GLib.idle_add(
+                    self.show_error_dialog,
+                    "Word list generation failed",
+                    str(exc),
+                )
+            finally:
+                self.close_generate_list_progress(progress)
+                GLib.idle_add(self.set_generate_list_busy, False)
+
+        threading.Thread(target=run, daemon=True).start()
+
     def load_words(self, path):
         try:
             text = path.read_text(encoding="utf-8")
@@ -175,22 +222,29 @@ class SpellingBeeApp(Gtk.Application):
             return
 
         words = []
+        seen = set()
         for line in text.splitlines():
             stripped = line.strip()
-            if stripped:
-                words.append(stripped)
+            if not stripped:
+                continue
+            key = stripped.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            words.append(stripped)
 
         if not words:
             self.word_label.set_text("No words found in file.")
             return
 
+        random.shuffle(words)
         self.words = words
         self.correct = 0
         self.total = 0
         self.update_score()
         self.remember_recent_list(path)
         self.list_scroller.set_visible(False)
-        self.load_button.set_visible(False)
+        self.list_button_row.set_visible(False)
         self.header.set_visible(False)
         self.entry.set_visible(True)
         self.button_row.set_visible(True)
@@ -204,7 +258,7 @@ class SpellingBeeApp(Gtk.Application):
             self.word_label.set_text("Load a word list to begin.")
             return
 
-        self.current_word = random.choice(self.words)
+        self.current_word = self.words.pop(0)
         self.current_sentence = None
         self.entry.set_text("")
         self.word_label.set_text("Listen and type the spelling.")
@@ -467,11 +521,17 @@ class SpellingBeeApp(Gtk.Application):
     def set_sentence_busy(self, busy):
         self.sentence_button.set_sensitive(not busy)
         self.sentence_spinner.set_visible(busy)
-        self.sentence_label.set_text("Generating..." if busy else "Use in a Sentence")
+        self.sentence_label.set_text("Generating sentence..." if busy else "Use in a Sentence")
         if busy:
             self.sentence_spinner.start()
         else:
             self.sentence_spinner.stop()
+
+    def set_generate_list_busy(self, busy):
+        self.generate_list_button.set_sensitive(not busy)
+        self.generate_list_button.set_label(
+            "Generating..." if busy else "Generate Word List"
+        )
 
     def get_llm(self):
         if self.llm:
@@ -690,12 +750,12 @@ class SpellingBeeApp(Gtk.Application):
         print('generate_sentence', word)
         llm = self.get_llm()
         prompt = (
-            'You are an announcer in a spelling bee competition. '
-            'Your task is to create a single example sentence that uses the given word exactly in context. '
-            'Do not output instructions, only the sentence. '
+            'You are an announcer in a spelling bee competition who is going to speak a sentence out loud. '
+            'Say only a single sentence that uses the given word exactly in context. '
             'Use the word exactly as spelled. '
             'Keep the sentence concise and clear.'
             f'Use the word "{word}" in a meaningful sentence.\n\n'
+            "Begin Sentence:\n"
         )
         print('prompt', prompt)
         result = llm(
@@ -709,6 +769,202 @@ class SpellingBeeApp(Gtk.Application):
         text = (result.get("choices") or [{}])[0].get("text", "").strip()
         print(text)
         return text
+
+    def generate_word_list(self, description, cancel_event, progress):
+        llm = self.get_llm()
+        prompt = (
+            f"Task: Generate 50 academic vocabulary words for {description}.\n"
+            f'Use words found in standard {description} textbooks and literature.\n'
+            'Do not use obscure spelling bee words.\n'
+            f"Do not use proper nouns, abbreviations, symbols, numbers or hyphens.\n"
+            f"Output one word per line. Each word must be unique.\n"
+            'Do not include any explanations or additional text.\n'
+        )
+        chunks = []
+        buffer = ""
+        last_word = ""
+        repeat_word = None
+        repeat_count = 0
+        for chunk in llm(
+            prompt,
+            max_tokens=512,
+            temperature=float(os.environ.get("LLM_TEMPERATURE", "0.7")),
+            top_p=float(os.environ.get("LLM_TOP_P", "0.9")),
+            stop=["\n\n"],
+            stream=True,
+        ):
+            if cancel_event.is_set():
+                return None
+            text_piece = (chunk.get("choices") or [{}])[0].get("text", "")
+            if text_piece:
+                sys.stdout.write(text_piece)
+                sys.stdout.flush()
+                buffer += text_piece
+                if "\n" in buffer:
+                    parts = buffer.split("\n")
+                    if buffer.endswith("\n"):
+                        candidate = parts[-2]
+                    else:
+                        candidate = parts[-2]
+                    cleaned = re.sub(r"[^A-Za-z]+", "", candidate).lower()
+                    if cleaned:
+                        last_word = cleaned
+                        if last_word == repeat_word:
+                            repeat_count += 1
+                        else:
+                            repeat_word = last_word
+                            repeat_count = 1
+                        if repeat_count > 5:
+                            raise RuntimeError(
+                                f"Generation stalled repeating '{repeat_word}'."
+                            )
+                        if progress:
+                            GLib.idle_add(
+                                self.update_generate_list_progress,
+                                progress,
+                                last_word,
+                            )
+                chunks.append(text_piece)
+        text = "".join(chunks).strip()
+        return self.parse_word_list(text)
+
+    def parse_word_list(self, text):
+        words = set()
+        for raw in text.split():
+            cleaned = re.sub(r"[^A-Za-z]+", "", raw).lower()
+            if cleaned:
+                words.add(cleaned)
+        words = sorted(words)
+        print('generated', words)
+        return words
+
+    def save_generated_word_list(self, description, words):
+        safe = re.sub(r"[^a-zA-Z0-9 -]+", "", description.strip())
+        safe = re.sub(r"\s+", " ", safe).strip()[:40]
+        if not safe:
+            safe = "generated"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+        directory = self.get_config_path() / "generated_lists"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{safe}-{timestamp}.txt"
+        path.write_text("\n".join(words) + "\n", encoding="utf-8")
+        return path
+
+    def prompt_word_list_description(self, on_done):
+        def show_dialog():
+            window = Gtk.Window(
+                transient_for=self.window, modal=True, title="Generate Word List"
+            )
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.set_margin_top(12)
+            box.set_margin_bottom(12)
+            box.set_margin_start(12)
+            box.set_margin_end(12)
+            label = Gtk.Label(
+                label="Give a difficulty for the word list (e.g., 8th Grade):"
+            )
+            label.set_xalign(0.0)
+            entry = Gtk.Entry()
+            entry.set_activates_default(True)
+            entry.set_placeholder_text("8th Grade")
+            button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            button_row.set_halign(Gtk.Align.END)
+            cancel_button = Gtk.Button(label="Cancel")
+            ok_button = Gtk.Button(label="Generate")
+            if hasattr(ok_button, "set_receives_default"):
+                ok_button.set_receives_default(True)
+            button_row.append(cancel_button)
+            button_row.append(ok_button)
+            box.append(label)
+            box.append(entry)
+            box.append(button_row)
+            window.set_child(box)
+            window.set_default_size(360, -1)
+            if hasattr(window, "set_default_widget"):
+                window.set_default_widget(ok_button)
+
+            def finish(value):
+                if getattr(window, "_closing", False):
+                    return
+                window._closing = True
+                window.close()
+                on_done(value)
+
+            cancel_button.connect("clicked", lambda _btn: finish(""))
+            ok_button.connect("clicked", lambda _btn: finish(entry.get_text().strip()))
+            entry.connect("activate", lambda _entry: finish(entry.get_text().strip()))
+            window.connect("close-request", lambda _win: (finish(""), False)[1])
+            window.present()
+            entry.grab_focus()
+            return False
+
+        GLib.idle_add(show_dialog)
+
+    def show_generate_list_progress(self, cancel_event):
+        state = {}
+
+        def show_window():
+            window = Gtk.Window(
+                transient_for=self.window, modal=True, title="Generating Word List"
+            )
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            box.set_margin_top(12)
+            box.set_margin_bottom(12)
+            box.set_margin_start(12)
+            box.set_margin_end(12)
+            label = Gtk.Label(label="Generating word list...")
+            label.set_xalign(0.0)
+            bar = Gtk.ProgressBar()
+            bar.set_show_text(True)
+            bar.set_text("Working...")
+            bar.pulse()
+            cancel_button = Gtk.Button(label="Cancel")
+            cancel_button.connect(
+                "clicked", lambda _btn: self.cancel_generation(window, cancel_event)
+            )
+            box.append(label)
+            box.append(bar)
+            box.append(cancel_button)
+            window.set_child(box)
+            window.set_default_size(320, -1)
+            window.present()
+            state["window"] = window
+            state["bar"] = bar
+            state["pulse_id"] = GLib.timeout_add(150, pulse)
+            return False
+
+        def pulse():
+            bar = state.get("bar")
+            if not bar:
+                return False
+            bar.pulse()
+            return True
+
+        GLib.idle_add(show_window)
+        return state
+
+    def update_generate_list_progress(self, state, text):
+        bar = state.get("bar")
+        if not bar:
+            return False
+        bar.set_text(text)
+        return False
+
+    def close_generate_list_progress(self, state):
+        def close():
+            pulse_id = state.get("pulse_id")
+            if pulse_id:
+                GLib.source_remove(pulse_id)
+            window = state.get("window")
+            if window:
+                window.close()
+            return False
+
+        GLib.idle_add(close)
+
+    def cancel_generation(self, window, cancel_event):
+        cancel_event.set()
+        window.close()
 
     def prefetch_sentence(self, word, allow_download):
         if not allow_download and not self.get_cached_model_path():
