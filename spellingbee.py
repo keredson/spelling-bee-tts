@@ -30,7 +30,7 @@ class SpellingBeeApp(Gtk.Application):
         GLib.set_application_name("Spelling Bee TTS")
         self.db_conn = None
         self.tracking_conn = None
-        self.remaining_count = 0
+        self.word_count = 0
         self.current_word = None
         self.correct = 0
         self.total = 0
@@ -610,10 +610,8 @@ class SpellingBeeApp(Gtk.Application):
                 conn.executemany(
                     "INSERT OR IGNORE INTO words VALUES (?, ?, ?, ?)", rows
                 )
-        conn.execute("CREATE TABLE remaining (word TEXT PRIMARY KEY)")
-        conn.execute("INSERT INTO remaining SELECT word FROM words")
-        self.remaining_count = conn.execute(
-            "SELECT COUNT(*) FROM remaining"
+        self.word_count = conn.execute(
+            "SELECT COUNT(*) FROM words"
         ).fetchone()[0]
         self.compute_difficulty_stats(conn)
         return conn
@@ -648,14 +646,10 @@ class SpellingBeeApp(Gtk.Application):
 
         word = self.pick_next_word()
         if not word:
-            self.word_label.set_text("No words remaining.")
+            self.word_label.set_text("No words available.")
             return
 
         self.current_word = word
-        self.db_conn.execute(
-            "DELETE FROM remaining WHERE word = ?", (self.current_word,)
-        )
-        self.remaining_count -= 1
         self.current_sentence = None
         self.entry.set_text("")
         self.word_label.set_text("Listen and type the spelling.")
@@ -668,15 +662,14 @@ class SpellingBeeApp(Gtk.Application):
             return None
         if not self.profile_rating:
             row = self.db_conn.execute(
-                "SELECT word FROM remaining ORDER BY RANDOM() LIMIT 1"
+                "SELECT word FROM words ORDER BY RANDOM() LIMIT 1"
             ).fetchone()
             return row[0] if row else None
-        candidate_limit = min(self.word_sample_size, self.remaining_count)
+        candidate_limit = min(self.word_sample_size, self.word_count)
         rows = self.db_conn.execute(
             """
-            SELECT remaining.word, words.difficulty
-            FROM remaining
-            JOIN words ON words.word = remaining.word
+            SELECT word, difficulty
+            FROM words
             ORDER BY RANDOM()
             LIMIT ?
             """,
@@ -695,11 +688,10 @@ class SpellingBeeApp(Gtk.Application):
             weight = 0.1 + 0.9 * base
             info = attempt_info.get(word)
             if info:
-                age = max(0, now - info["last_seen"])
-                recency = min(age / (7 * 24 * 60 * 60), 1.0)
-                weight *= 1.0 + 0.5 * recency
                 if info["edit_distance"] > 0:
                     weight *= 1.35
+                else:
+                    weight *= 0.75
             else:
                 weight *= 1.15
             total += weight
