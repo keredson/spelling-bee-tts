@@ -302,15 +302,16 @@ class SpellingBeeApp(Gtk.Application):
         if not self.tracking_conn:
             return []
         rows = self.tracking_conn.execute(
-            "SELECT id, name, grade_level FROM profiles ORDER BY name"
+            "SELECT id, name, grade_level, ability_rating FROM profiles ORDER BY name"
         ).fetchall()
         profiles = []
-        for profile_id, name, grade_level in rows:
+        for profile_id, name, grade_level, ability_rating in rows:
             profiles.append(
                 {
                     "id": profile_id,
                     "name": name,
                     "grade_level": grade_level,
+                    "ability_rating": ability_rating,
                 }
             )
         return profiles
@@ -367,7 +368,13 @@ class SpellingBeeApp(Gtk.Application):
         labels = []
         for profile in profiles:
             name = profile["name"]
-            grade_text = self.format_grade_label(profile["grade_level"])
+            ability_rating = profile.get("ability_rating")
+            if ability_rating is not None:
+                grade_text = self.format_grade_label(
+                    self.rating_to_grade_level(ability_rating)
+                )
+            else:
+                grade_text = self.format_grade_label(profile["grade_level"])
             if grade_text:
                 labels.append(f"{name} ({grade_text})")
             else:
