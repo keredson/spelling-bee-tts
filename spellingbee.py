@@ -65,6 +65,7 @@ class SpellingBeeApp(Gtk.Application):
         self.difficulty_std = None
         self.word_sample_size = 300
         self.word_sigma = 200.0
+        self.awaiting_continue = False
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -92,7 +93,7 @@ class SpellingBeeApp(Gtk.Application):
         self.entry.set_placeholder_text("Type your spelling here")
         self.entry.connect("activate", self.on_submit)
 
-        self.submit_button = Gtk.Button(label="Submit")
+        self.submit_button = Gtk.Button(label="Check")
         self.submit_button.connect("clicked", self.on_submit)
 
         self.say_again_button = Gtk.Button()
@@ -651,6 +652,9 @@ class SpellingBeeApp(Gtk.Application):
             self.word_label.set_text("Word list not loaded.")
             return
 
+        self.awaiting_continue = False
+        self.entry.set_editable(True)
+        self.submit_button.set_label("Check")
         word = self.pick_next_word()
         if not word:
             self.word_label.set_text("No words available.")
@@ -735,6 +739,12 @@ class SpellingBeeApp(Gtk.Application):
         return info
 
     def on_submit(self, _widget):
+        if self.awaiting_continue:
+            self.awaiting_continue = False
+            self.entry.set_editable(True)
+            self.submit_button.set_label("Check")
+            self.next_word()
+            return
         if not self.current_word:
             return
 
@@ -750,10 +760,12 @@ class SpellingBeeApp(Gtk.Application):
             self.speak("That is correct!", on_done=self.after_feedback)
         else:
             self.word_label.set_text(f"Incorrect. It was: {self.current_word}")
+            self.awaiting_continue = True
+            self.entry.set_editable(False)
+            self.submit_button.set_label("Continue")
             self.speak(
                 f"Sorry, that is not correct, the correct spelling is: {'. '.join(self.current_word)}"
                 ,
-                on_done=self.after_feedback,
             )
 
         self.update_score()
