@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
+import math
 
 import gi
 
@@ -57,6 +58,10 @@ class SpellingBeeApp(Gtk.Application):
         self.profile_ids = []
         self.profile_allow_close = False
         self.grade_levels = self.build_grade_levels()
+        self.profile_rating = None
+        self.profile_attempts = 0
+        self.difficulty_mean = None
+        self.difficulty_std = None
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -187,6 +192,9 @@ class SpellingBeeApp(Gtk.Application):
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE,
                     grade_level INTEGER,
+                    ability_rating REAL,
+                    attempts_count INTEGER NOT NULL DEFAULT 0,
+                    ability_updated_at INTEGER,
                     created_at INTEGER NOT NULL
                 )
                 """
@@ -207,10 +215,13 @@ class SpellingBeeApp(Gtk.Application):
             self.tracking_conn.execute(
                 "CREATE INDEX attempts_profile_time ON attempts(profile_id, created_at)"
             )
-            self.tracking_conn.execute("PRAGMA user_version = 2")
+            self.tracking_conn.execute("PRAGMA user_version = 3")
             self.tracking_conn.commit()
         elif version == 1:
             self.migrate_profiles_to_int()
+            self.migrate_add_profile_ratings()
+        elif version == 2:
+            self.migrate_add_profile_ratings()
 
     def migrate_profiles_to_int(self):
         if not self.tracking_conn:
@@ -244,6 +255,45 @@ class SpellingBeeApp(Gtk.Application):
             self.tracking_conn.commit()
         finally:
             self.tracking_conn.execute("PRAGMA foreign_keys = ON")
+
+    def migrate_add_profile_ratings(self):
+        if not self.tracking_conn:
+            return
+        try:
+            self.tracking_conn.execute(
+                "ALTER TABLE profiles ADD COLUMN ability_rating REAL"
+            )
+        except sqlite3.Error:
+            pass
+        try:
+            self.tracking_conn.execute(
+                "ALTER TABLE profiles ADD COLUMN attempts_count INTEGER NOT NULL DEFAULT 0"
+            )
+        except sqlite3.Error:
+            pass
+        try:
+            self.tracking_conn.execute(
+                "ALTER TABLE profiles ADD COLUMN ability_updated_at INTEGER"
+            )
+        except sqlite3.Error:
+            pass
+        rows = self.tracking_conn.execute(
+            "SELECT id, grade_level FROM profiles"
+        ).fetchall()
+        for profile_id, grade_level in rows:
+            rating = self.grade_to_rating(grade_level)
+            self.tracking_conn.execute(
+                """
+                UPDATE profiles
+                SET ability_rating = COALESCE(ability_rating, ?),
+                    attempts_count = COALESCE(attempts_count, 0),
+                    ability_updated_at = COALESCE(ability_updated_at, created_at)
+                WHERE id = ?
+                """,
+                (rating, profile_id),
+            )
+        self.tracking_conn.execute("PRAGMA user_version = 3")
+        self.tracking_conn.commit()
 
     def load_profiles(self):
         if not self.tracking_conn:
@@ -316,10 +366,7 @@ class SpellingBeeApp(Gtk.Application):
             name = profile["name"]
             grade_text = self.format_grade_label(profile["grade_level"])
             if grade_text:
-                if grade_text.startswith("College"):
-                    labels.append(f"{name} ({grade_text})")
-                else:
-                    labels.append(f"{name} (Grade {grade_text})")
+                labels.append(f"{name} ({grade_text})")
             else:
                 labels.append(name)
         model = Gtk.StringList.new(labels)
@@ -356,13 +403,26 @@ class SpellingBeeApp(Gtk.Application):
             return
         profile_id = self.profile_ids[index]
         row = self.tracking_conn.execute(
-            "SELECT name, grade_level FROM profiles WHERE id = ?",
+            "SELECT name, grade_level, ability_rating, attempts_count FROM profiles WHERE id = ?",
             (profile_id,),
         ).fetchone()
         if row:
             self.profile_id = profile_id
             self.profile_name = row[0]
             self.profile_grade = row[1]
+            self.profile_rating = row[2]
+            self.profile_attempts = row[3] or 0
+            if self.profile_rating is None:
+                self.profile_rating = self.grade_to_rating(self.profile_grade)
+                self.tracking_conn.execute(
+                    """
+                    UPDATE profiles
+                    SET ability_rating = ?, ability_updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (self.profile_rating, int(time.time()), self.profile_id),
+                )
+                self.tracking_conn.commit()
         if self.profile_window:
             self.profile_allow_close = True
             self.profile_window.close()
@@ -474,8 +534,18 @@ class SpellingBeeApp(Gtk.Application):
         grade = self.grade_levels[selected][0]
         try:
             cursor = self.tracking_conn.execute(
-                "INSERT INTO profiles (name, grade_level, created_at) VALUES (?, ?, ?)",
-                (name, grade, int(time.time())),
+                """
+                INSERT INTO profiles (name, grade_level, ability_rating, attempts_count, ability_updated_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    grade,
+                    self.grade_to_rating(grade),
+                    0,
+                    int(time.time()),
+                    int(time.time()),
+                ),
             )
             self.tracking_conn.commit()
             new_profile_id = cursor.lastrowid
@@ -542,7 +612,23 @@ class SpellingBeeApp(Gtk.Application):
         self.remaining_count = conn.execute(
             "SELECT COUNT(*) FROM remaining"
         ).fetchone()[0]
+        self.compute_difficulty_stats(conn)
         return conn
+
+    def compute_difficulty_stats(self, conn):
+        row = conn.execute(
+            "SELECT AVG(difficulty), AVG(difficulty * difficulty) FROM words WHERE difficulty IS NOT NULL"
+        ).fetchone()
+        if not row:
+            return
+        mean = row[0]
+        mean_sq = row[1]
+        if mean is None or mean_sq is None:
+            return
+        variance = max(0.0, mean_sq - mean * mean)
+        std = math.sqrt(variance)
+        self.difficulty_mean = mean
+        self.difficulty_std = std if std > 0 else None
 
     def parse_float(self, value):
         if value is None or value == "":
@@ -620,7 +706,11 @@ class SpellingBeeApp(Gtk.Application):
         self.prefetch_sentence(self.current_word, allow_download=True)
 
     def update_score(self):
-        self.score_label.set_text(f"Score: {self.correct}/{self.total}")
+        rating_text = self.format_estimated_level()
+        if rating_text:
+            self.score_label.set_text(f"Score: {int(self.profile_rating)} | {rating_text}")
+        else:
+            self.score_label.set_text(f"Score: {int(self.profile_rating)}")
 
     def speak(self, text, on_done=None, reset_label=True):
         mp3_players = self.pick_mp3_players()
@@ -706,9 +796,9 @@ class SpellingBeeApp(Gtk.Application):
         if grade_level is None:
             return ""
         if grade_level == 0:
-            return "K"
+            return "Kindergarten"
         if 1 <= grade_level <= 12:
-            return str(grade_level)
+            return 'Grade %i' % grade_level
         college = {
             13: "College Freshman",
             14: "College Sophomore",
@@ -798,6 +888,7 @@ class SpellingBeeApp(Gtk.Application):
                 ),
             )
             self.tracking_conn.commit()
+            self.update_profile_rating(distance, self.current_word)
         except sqlite3.Error:
             pass
 
@@ -822,6 +913,81 @@ class SpellingBeeApp(Gtk.Application):
                 )
             prev = curr
         return prev[-1]
+
+    def grade_to_rating(self, grade_level):
+        if grade_level is None:
+            return 1000.0
+        return 800.0 + float(grade_level) * 40.0
+
+    def rating_to_grade_level(self, rating):
+        if rating is None:
+            return None
+        grade = round((rating - 800.0) / 40.0)
+        return max(0, min(16, grade))
+
+    def format_estimated_level(self):
+        if self.profile_rating is None:
+            return ""
+        grade = self.rating_to_grade_level(self.profile_rating)
+        grade_text = self.format_grade_label(grade)
+        if grade_text:
+            return f"Level: {grade_text}"
+
+    def get_word_difficulty(self, word):
+        if not self.db_conn or not word:
+            return None
+        row = self.db_conn.execute(
+            "SELECT difficulty FROM words WHERE word = ?",
+            (word,),
+        ).fetchone()
+        if not row:
+            return None
+        return row[0]
+
+    def word_rating_from_difficulty(self, difficulty):
+        if difficulty is None:
+            return 1000.0
+        if self.difficulty_std:
+            z = (difficulty - self.difficulty_mean) / self.difficulty_std
+            z = max(-2.5, min(2.5, z))
+            return 1000.0 + 300.0 * z
+        return 800.0 + 400.0 * float(difficulty)
+
+    def score_from_distance(self, distance, word):
+        if distance == 0:
+            return 1.0
+        length = max(len(word), 1)
+        proximity = max(0.0, 1.0 - (distance / length))
+        return max(0.0, proximity * 0.7)
+
+    def get_k_factor(self, attempts_count):
+        if attempts_count < 50:
+            return 32.0
+        if attempts_count < 200:
+            return 24.0
+        return 16.0
+
+    def update_profile_rating(self, distance, word):
+        if not self.tracking_conn or not self.profile_id:
+            return
+        difficulty = self.get_word_difficulty(word)
+        word_rating = self.word_rating_from_difficulty(difficulty)
+        if self.profile_rating is None:
+            self.profile_rating = self.grade_to_rating(self.profile_grade)
+        expected = 1.0 / (1.0 + 10 ** ((word_rating - self.profile_rating) / 400.0))
+        score = self.score_from_distance(distance, word)
+        k = self.get_k_factor(self.profile_attempts)
+        self.profile_rating = self.profile_rating + k * (score - expected)
+        self.profile_attempts += 1
+        self.tracking_conn.execute(
+            """
+            UPDATE profiles
+            SET ability_rating = ?, attempts_count = ?, ability_updated_at = ?
+            WHERE id = ?
+            """,
+            (self.profile_rating, self.profile_attempts, int(time.time()), self.profile_id),
+        )
+        self.tracking_conn.commit()
 
     def get_llm(self):
         if self.llm:
