@@ -664,7 +664,7 @@ class SpellingBeeApp(Gtk.Application):
         self.current_sentence = None
         self.entry.set_text("")
         self.word_label.set_text("Listen and type the spelling.")
-        self.entry.grab_focus()
+        self.focus_entry()
         self.speak("Please spell: " + self.current_word)
         self.prefetch_sentence(self.current_word, allow_download=False)
 
@@ -777,7 +777,7 @@ class SpellingBeeApp(Gtk.Application):
     def on_say_again(self, _button):
         if self.current_word:
             self.speak(self.current_word)
-            self.entry.grab_focus()
+            self.focus_entry()
 
     def on_use_sentence(self, _button):
         if not self.current_word:
@@ -785,7 +785,7 @@ class SpellingBeeApp(Gtk.Application):
 
         if self.current_sentence:
             self.speak(self.current_sentence, reset_label=False)
-            self.entry.grab_focus()
+            self.focus_entry()
             return
         self.prefetch_sentence(self.current_word, allow_download=True)
 
@@ -1344,7 +1344,13 @@ class SpellingBeeApp(Gtk.Application):
 
     def ensure_entry_focus(self):
         if not self.entry.has_focus():
-            self.entry.grab_focus()
+            self.focus_entry()
+
+    def focus_entry(self):
+        self.entry.grab_focus()
+        self.entry.set_position(-1)
+        pos = self.entry.get_position()
+        self.entry.select_region(pos, pos)
 
     def update_window_height(self):
         if not getattr(self, "window", None):
