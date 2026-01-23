@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -63,7 +64,7 @@ class SpellingBeeApp(Gtk.Application):
         self.profile_attempts = 0
         self.difficulty_mean = None
         self.difficulty_std = None
-        self.word_sample_size = 300
+        self.word_sample_size = 500
         self.word_sigma = 200.0
         self.awaiting_continue = False
 
@@ -573,10 +574,14 @@ class SpellingBeeApp(Gtk.Application):
             self.profile_dropdown.set_selected(self.profile_ids.index(new_profile_id))
 
     def find_words_csv(self):
+        data_root = sysconfig.get_paths().get("data")
         candidates = [
-            Path(__file__).resolve().parent / "words.csv.gz",
             Path.cwd() / "words.csv.gz",
         ]
+        if data_root:
+            candidates.append(
+                Path(data_root) / "share" / "spellingbee" / "words.csv.gz"
+            )
         for candidate in candidates:
             if candidate.exists():
                 return candidate
