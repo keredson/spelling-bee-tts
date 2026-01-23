@@ -14,6 +14,7 @@ import time
 import urllib.request
 from pathlib import Path
 import math
+import random
 
 import gi
 
@@ -62,6 +63,8 @@ class SpellingBeeApp(Gtk.Application):
         self.profile_attempts = 0
         self.difficulty_mean = None
         self.difficulty_std = None
+        self.word_sample_size = 300
+        self.word_sigma = 200.0
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -643,14 +646,12 @@ class SpellingBeeApp(Gtk.Application):
             self.word_label.set_text("Word list not loaded.")
             return
 
-        row = self.db_conn.execute(
-            "SELECT word FROM remaining ORDER BY RANDOM() LIMIT 1"
-        ).fetchone()
-        if not row:
+        word = self.pick_next_word()
+        if not word:
             self.word_label.set_text("No words remaining.")
             return
 
-        self.current_word = row[0]
+        self.current_word = word
         self.db_conn.execute(
             "DELETE FROM remaining WHERE word = ?", (self.current_word,)
         )
@@ -661,6 +662,78 @@ class SpellingBeeApp(Gtk.Application):
         self.entry.grab_focus()
         self.speak("Please spell: " + self.current_word)
         self.prefetch_sentence(self.current_word, allow_download=False)
+
+    def pick_next_word(self):
+        if not self.db_conn:
+            return None
+        if not self.profile_rating:
+            row = self.db_conn.execute(
+                "SELECT word FROM remaining ORDER BY RANDOM() LIMIT 1"
+            ).fetchone()
+            return row[0] if row else None
+        candidate_limit = min(self.word_sample_size, self.remaining_count)
+        rows = self.db_conn.execute(
+            """
+            SELECT remaining.word, words.difficulty
+            FROM remaining
+            JOIN words ON words.word = remaining.word
+            ORDER BY RANDOM()
+            LIMIT ?
+            """,
+            (candidate_limit,),
+        ).fetchall()
+        if not rows:
+            return None
+        attempt_info = self.fetch_attempt_info([row[0] for row in rows])
+        now = int(time.time())
+        weights = []
+        total = 0.0
+        for word, difficulty in rows:
+            word_rating = self.word_rating_from_difficulty(difficulty)
+            gap = abs(word_rating - self.profile_rating)
+            base = math.exp(-(gap * gap) / (2.0 * self.word_sigma * self.word_sigma))
+            weight = 0.1 + 0.9 * base
+            info = attempt_info.get(word)
+            if info:
+                age = max(0, now - info["last_seen"])
+                recency = min(age / (7 * 24 * 60 * 60), 1.0)
+                weight *= 1.0 + 0.5 * recency
+                if info["edit_distance"] > 0:
+                    weight *= 1.35
+            else:
+                weight *= 1.15
+            total += weight
+            weights.append((word, total))
+        if total <= 0:
+            return rows[0][0]
+        pick = random.random() * total
+        for word, cumulative in weights:
+            if pick <= cumulative:
+                return word
+        return rows[-1][0]
+
+    def fetch_attempt_info(self, words):
+        if not self.tracking_conn or not self.profile_id or not words:
+            return {}
+        placeholders = ",".join("?" for _ in words)
+        query = f"""
+            WITH last AS (
+                SELECT word, MAX(created_at) AS last_seen
+                FROM attempts
+                WHERE profile_id = ? AND word IN ({placeholders})
+                GROUP BY word
+            )
+            SELECT a.word, l.last_seen, a.edit_distance
+            FROM attempts a
+            JOIN last l ON l.word = a.word AND l.last_seen = a.created_at
+            WHERE a.profile_id = ?
+        """
+        params = [self.profile_id, *words, self.profile_id]
+        rows = self.tracking_conn.execute(query, params).fetchall()
+        info = {}
+        for word, last_seen, edit_distance in rows:
+            info[word] = {"last_seen": last_seen, "edit_distance": edit_distance}
+        return info
 
     def on_submit(self, _widget):
         if not self.current_word:
@@ -708,7 +781,7 @@ class SpellingBeeApp(Gtk.Application):
     def update_score(self):
         rating_text = self.format_estimated_level()
         if rating_text:
-            self.score_label.set_text(f"Score: {int(self.profile_rating)} | {rating_text}")
+            self.score_label.set_text(f"Score: {int(self.profile_rating)} - {rating_text}")
         else:
             self.score_label.set_text(f"Score: {int(self.profile_rating)}")
 
@@ -930,8 +1003,7 @@ class SpellingBeeApp(Gtk.Application):
             return ""
         grade = self.rating_to_grade_level(self.profile_rating)
         grade_text = self.format_grade_label(grade)
-        if grade_text:
-            return f"Level: {grade_text}"
+        return grade_text
 
     def get_word_difficulty(self, word):
         if not self.db_conn or not word:
