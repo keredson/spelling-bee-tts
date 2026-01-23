@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import sysconfig
+import site
 import tempfile
 import threading
 import time
@@ -574,14 +575,22 @@ class SpellingBeeApp(Gtk.Application):
             self.profile_dropdown.set_selected(self.profile_ids.index(new_profile_id))
 
     def find_words_csv(self):
-        data_root = sysconfig.get_paths().get("data")
+        data_roots = [sysconfig.get_paths().get("data"), site.USER_BASE]
+        xdg_data_home = os.environ.get("XDG_DATA_HOME")
+        xdg_data_dirs = os.environ.get("XDG_DATA_DIRS", "")
         candidates = [
             Path.cwd() / "words.csv.gz",
+            Path(__file__).resolve().parent / "words.csv.gz",
         ]
-        if data_root:
-            candidates.append(
-                Path(data_root) / "share" / "spellingbee" / "words.csv.gz"
-            )
+        for data_root in data_roots:
+            if data_root:
+                candidates.append(
+                    Path(data_root) / "share" / "spellingbee" / "words.csv.gz"
+                )
+        if xdg_data_home:
+            candidates.append(Path(xdg_data_home) / "spellingbee" / "words.csv.gz")
+        for data_root in [p for p in xdg_data_dirs.split(":") if p]:
+            candidates.append(Path(data_root) / "spellingbee" / "words.csv.gz")
         for candidate in candidates:
             if candidate.exists():
                 return candidate
