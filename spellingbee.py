@@ -27,6 +27,7 @@ class SpellingBeeApp(Gtk.Application):
         super().__init__(application_id="org.pypi.project.spelling-bee-tts")
         GLib.set_application_name("Spelling Bee TTS")
         self.db_conn = None
+        self.tracking_conn = None
         self.remaining_count = 0
         self.current_word = None
         self.correct = 0
@@ -46,6 +47,16 @@ class SpellingBeeApp(Gtk.Application):
         self.llm_model_path = None
         self.current_sentence = None
         self._sentence_generation_id = 0
+        self.profile_id = None
+        self.profile_name = None
+        self.profile_grade = None
+        self.profile_window = None
+        self.profile_dropdown = None
+        self.profile_start_button = None
+        self.profile_delete_button = None
+        self.profile_ids = []
+        self.profile_allow_close = False
+        self.grade_levels = self.build_grade_levels()
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -114,11 +125,16 @@ class SpellingBeeApp(Gtk.Application):
 
         self.window.set_child(outer)
         self.window.present()
-        self.load_default_words()
+        self.init_tracking_db()
+        self.show_profile_selector()
         self.check_system_dependencies(self.window)
         self.maybe_check_for_updates()
 
     def on_close_request(self, _window):
+        if self.db_conn:
+            self.db_conn.close()
+        if self.tracking_conn:
+            self.tracking_conn.close()
         self.quit()
         return False
 
@@ -143,6 +159,337 @@ class SpellingBeeApp(Gtk.Application):
         self.entry.grab_focus()
         self.next_word()
         self.update_window_height()
+
+    def init_tracking_db(self):
+        data_path = self.get_data_path()
+        try:
+            data_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.show_error_dialog("Data directory error", str(exc))
+            return
+        db_path = data_path / "spellingbee.db"
+        print('using db:', db_path)
+        try:
+            self.tracking_conn = sqlite3.connect(str(db_path))
+            self.tracking_conn.execute("PRAGMA foreign_keys = ON")
+            self.ensure_tracking_schema()
+        except sqlite3.Error as exc:
+            self.show_error_dialog("Database error", str(exc))
+
+    def ensure_tracking_schema(self):
+        if not self.tracking_conn:
+            return
+        version = self.tracking_conn.execute("PRAGMA user_version").fetchone()[0]
+        if version == 0:
+            self.tracking_conn.execute(
+                """
+                CREATE TABLE profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    grade_level INTEGER,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+            self.tracking_conn.execute(
+                """
+                CREATE TABLE attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER NOT NULL,
+                    word TEXT NOT NULL,
+                    attempt TEXT NOT NULL,
+                    edit_distance INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+                )
+                """
+            )
+            self.tracking_conn.execute(
+                "CREATE INDEX attempts_profile_time ON attempts(profile_id, created_at)"
+            )
+            self.tracking_conn.execute("PRAGMA user_version = 2")
+            self.tracking_conn.commit()
+        elif version == 1:
+            self.migrate_profiles_to_int()
+
+    def migrate_profiles_to_int(self):
+        if not self.tracking_conn:
+            return
+        try:
+            self.tracking_conn.execute("PRAGMA foreign_keys = OFF")
+            self.tracking_conn.execute(
+                """
+                CREATE TABLE profiles_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    grade_level INTEGER,
+                    created_at INTEGER NOT NULL
+                )
+                """
+            )
+            rows = self.tracking_conn.execute(
+                "SELECT id, name, grade_level, created_at FROM profiles"
+            ).fetchall()
+            converted = []
+            for profile_id, name, grade_text, created_at in rows:
+                grade_int = self.parse_grade_level(grade_text)
+                converted.append((profile_id, name, grade_int, created_at))
+            self.tracking_conn.executemany(
+                "INSERT INTO profiles_new (id, name, grade_level, created_at) VALUES (?, ?, ?, ?)",
+                converted,
+            )
+            self.tracking_conn.execute("DROP TABLE profiles")
+            self.tracking_conn.execute("ALTER TABLE profiles_new RENAME TO profiles")
+            self.tracking_conn.execute("PRAGMA user_version = 2")
+            self.tracking_conn.commit()
+        finally:
+            self.tracking_conn.execute("PRAGMA foreign_keys = ON")
+
+    def load_profiles(self):
+        if not self.tracking_conn:
+            return []
+        rows = self.tracking_conn.execute(
+            "SELECT id, name, grade_level FROM profiles ORDER BY name"
+        ).fetchall()
+        profiles = []
+        for profile_id, name, grade_level in rows:
+            profiles.append(
+                {
+                    "id": profile_id,
+                    "name": name,
+                    "grade_level": grade_level,
+                }
+            )
+        return profiles
+
+    def show_profile_selector(self):
+        if self.profile_window:
+            self.profile_window.present()
+            return
+        window = Gtk.Window(transient_for=self.window, modal=True, title="Select profile")
+        window.set_default_size(360, -1)
+        window.connect("close-request", self.on_profile_close_request)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        label = Gtk.Label(label="Choose a profile to begin.")
+        label.set_xalign(0.0)
+        box.append(label)
+
+        self.profile_dropdown = Gtk.DropDown()
+        self.profile_dropdown.connect("notify::selected", self.on_profile_selection_changed)
+        box.append(self.profile_dropdown)
+
+        button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        button_row.set_halign(Gtk.Align.END)
+
+        create_button = Gtk.Button(label="Create profile")
+        create_button.connect("clicked", self.on_create_profile_clicked)
+        self.profile_delete_button = Gtk.Button(label="Delete profile")
+        self.profile_delete_button.connect("clicked", self.on_delete_profile_clicked)
+        self.profile_start_button = Gtk.Button(label="Start")
+        self.profile_start_button.connect("clicked", self.on_profile_start_clicked)
+
+        button_row.append(create_button)
+        button_row.append(self.profile_delete_button)
+        button_row.append(self.profile_start_button)
+        box.append(button_row)
+
+        window.set_child(box)
+        window.present()
+        self.profile_window = window
+        self.refresh_profile_dropdown()
+        if not self.profile_ids:
+            self.on_create_profile_clicked(None)
+
+    def refresh_profile_dropdown(self):
+        if not self.profile_dropdown:
+            return
+        profiles = self.load_profiles()
+        self.profile_ids = [profile["id"] for profile in profiles]
+        labels = []
+        for profile in profiles:
+            name = profile["name"]
+            grade_text = self.format_grade_label(profile["grade_level"])
+            if grade_text:
+                if grade_text.startswith("College"):
+                    labels.append(f"{name} ({grade_text})")
+                else:
+                    labels.append(f"{name} (Grade {grade_text})")
+            else:
+                labels.append(name)
+        model = Gtk.StringList.new(labels)
+        self.profile_dropdown.set_model(model)
+        if labels:
+            self.profile_dropdown.set_selected(0)
+            self.profile_start_button.set_sensitive(True)
+        else:
+            self.profile_start_button.set_sensitive(False)
+        if self.profile_delete_button:
+            self.profile_delete_button.set_sensitive(bool(labels))
+
+    def on_profile_selection_changed(self, _dropdown, _param):
+        if not self.profile_delete_button:
+            return
+        has_selection = (
+            bool(self.profile_ids)
+            and self.profile_dropdown is not None
+            and self.profile_dropdown.get_selected() >= 0
+        )
+        self.profile_delete_button.set_sensitive(has_selection)
+
+    def on_profile_close_request(self, _window):
+        if self.profile_allow_close:
+            return False
+        self.quit()
+        return False
+
+    def on_profile_start_clicked(self, _button):
+        if not self.profile_ids:
+            return
+        index = self.profile_dropdown.get_selected()
+        if index < 0 or index >= len(self.profile_ids):
+            return
+        profile_id = self.profile_ids[index]
+        row = self.tracking_conn.execute(
+            "SELECT name, grade_level FROM profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+        if row:
+            self.profile_id = profile_id
+            self.profile_name = row[0]
+            self.profile_grade = row[1]
+        if self.profile_window:
+            self.profile_allow_close = True
+            self.profile_window.close()
+            self.profile_window = None
+            self.profile_allow_close = False
+        self.load_default_words()
+
+    def on_create_profile_clicked(self, _button):
+        dialog = Gtk.Window(
+            transient_for=self.profile_window or self.window,
+            modal=True,
+            title="Create profile",
+        )
+        dialog.set_default_size(320, -1)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        name_label = Gtk.Label(label="Name")
+        name_label.set_xalign(0.0)
+        name_entry = Gtk.Entry()
+        name_entry.set_placeholder_text("Student name")
+
+        grade_label = Gtk.Label(label="Grade level")
+        grade_label.set_xalign(0.0)
+        grade_dropdown = Gtk.DropDown()
+        grade_dropdown.set_model(Gtk.StringList.new([label for _value, label in self.grade_levels]))
+        grade_dropdown.set_selected(0)
+
+        button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        button_row.set_halign(Gtk.Align.END)
+        cancel_button = Gtk.Button(label="Cancel")
+        create_button = Gtk.Button(label="Create")
+
+        cancel_button.connect("clicked", lambda _b: dialog.close())
+        create_button.connect(
+            "clicked",
+            self.on_create_profile_confirm,
+            dialog,
+            name_entry,
+            grade_dropdown,
+        )
+
+        button_row.append(cancel_button)
+        button_row.append(create_button)
+
+        box.append(name_label)
+        box.append(name_entry)
+        box.append(grade_label)
+        box.append(grade_dropdown)
+        box.append(button_row)
+
+        dialog.set_child(box)
+        dialog.present()
+        name_entry.grab_focus()
+
+    def on_delete_profile_clicked(self, _button):
+        if not self.profile_ids:
+            return
+        index = self.profile_dropdown.get_selected()
+        if index < 0 or index >= len(self.profile_ids):
+            return
+        profile_id = self.profile_ids[index]
+        row = self.tracking_conn.execute(
+            "SELECT name FROM profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+        if not row:
+            return
+        name = row[0]
+
+        dialog = Gtk.AlertDialog()
+        dialog.set_message("Delete profile?")
+        dialog.set_detail(f"This will remove {name} and all attempts.")
+        dialog.set_buttons(["Delete", "Cancel"])
+        dialog.choose(
+            self.profile_window or self.window,
+            None,
+            self.on_delete_profile_response,
+            profile_id,
+        )
+
+    def on_delete_profile_response(self, dialog, async_result, profile_id):
+        try:
+            response = dialog.choose_finish(async_result)
+        except Exception:
+            return
+        if response != 0:
+            return
+        try:
+            self.tracking_conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+            self.tracking_conn.commit()
+        except sqlite3.Error as exc:
+            self.show_error_dialog("Profile error", str(exc))
+            return
+        self.refresh_profile_dropdown()
+
+    def on_create_profile_confirm(self, _button, dialog, name_entry, grade_dropdown):
+        name = name_entry.get_text().strip()
+        if not name:
+            self.show_error_dialog("Profile error", "Please enter a name.")
+            return
+        selected = grade_dropdown.get_selected()
+        if selected < 0 or selected >= len(self.grade_levels):
+            self.show_error_dialog("Profile error", "Please select a grade level.")
+            return
+        grade = self.grade_levels[selected][0]
+        try:
+            cursor = self.tracking_conn.execute(
+                "INSERT INTO profiles (name, grade_level, created_at) VALUES (?, ?, ?)",
+                (name, grade, int(time.time())),
+            )
+            self.tracking_conn.commit()
+            new_profile_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            self.show_error_dialog("Profile error", "That name already exists.")
+            return
+        except sqlite3.Error as exc:
+            self.show_error_dialog("Profile error", str(exc))
+            return
+
+        dialog.close()
+        self.refresh_profile_dropdown()
+        if new_profile_id in self.profile_ids:
+            self.profile_dropdown.set_selected(self.profile_ids.index(new_profile_id))
 
     def find_words_csv(self):
         candidates = [
@@ -238,6 +585,7 @@ class SpellingBeeApp(Gtk.Application):
             return
 
         self.total += 1
+        self.log_attempt(guess)
         if guess.lower() == self.current_word.lower():
             self.correct += 1
             self.word_label.set_text("Correct! Next word...")
@@ -335,6 +683,60 @@ class SpellingBeeApp(Gtk.Application):
             return Path(config_home) / "spellingbee"
         return Path.home() / ".config" / "spellingbee"
 
+    def get_data_path(self):
+        data_home = os.environ.get("XDG_DATA_HOME")
+        if data_home:
+            return Path(data_home) / "spellingbee"
+        return Path.home() / ".local" / "share" / "spellingbee"
+
+    def build_grade_levels(self):
+        levels = [(0, "Kindergarten")]
+        levels.extend([(grade, 'Grade %i' % grade) for grade in range(1, 13)])
+        levels.extend(
+            [
+                (13, "College Freshman"),
+                (14, "College Sophomore"),
+                (15, "College Junior"),
+                (16, "College Senior"),
+            ]
+        )
+        return levels
+
+    def format_grade_label(self, grade_level):
+        if grade_level is None:
+            return ""
+        if grade_level == 0:
+            return "K"
+        if 1 <= grade_level <= 12:
+            return str(grade_level)
+        college = {
+            13: "College Freshman",
+            14: "College Sophomore",
+            15: "College Junior",
+            16: "College Senior",
+        }
+        return college.get(grade_level, str(grade_level))
+
+    def parse_grade_level(self, value):
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        if text in {"k", "kindergarten"}:
+            return 0
+        if text.isdigit():
+            return int(text)
+        if "freshman" in text:
+            return 13
+        if "sophomore" in text:
+            return 14
+        if "junior" in text:
+            return 15
+        if "senior" in text:
+            return 16
+        return None
+
     def pick_mp3_players(self):
         players = []
         for candidate in ("mpv", "ffplay", "mpg123"):
@@ -376,6 +778,50 @@ class SpellingBeeApp(Gtk.Application):
             self.sentence_spinner.start()
         else:
             self.sentence_spinner.stop()
+
+    def log_attempt(self, guess):
+        if not self.tracking_conn or not self.profile_id or not self.current_word:
+            return
+        distance = self.edit_distance(guess.lower(), self.current_word.lower())
+        try:
+            self.tracking_conn.execute(
+                """
+                INSERT INTO attempts (profile_id, word, attempt, edit_distance, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    self.profile_id,
+                    self.current_word,
+                    guess,
+                    distance,
+                    int(time.time()),
+                ),
+            )
+            self.tracking_conn.commit()
+        except sqlite3.Error:
+            pass
+
+    def edit_distance(self, source, target):
+        if source == target:
+            return 0
+        if not source:
+            return len(target)
+        if not target:
+            return len(source)
+        prev = list(range(len(target) + 1))
+        for i, s_char in enumerate(source, start=1):
+            curr = [i]
+            for j, t_char in enumerate(target, start=1):
+                cost = 0 if s_char == t_char else 1
+                curr.append(
+                    min(
+                        prev[j] + 1,
+                        curr[j - 1] + 1,
+                        prev[j - 1] + cost,
+                    )
+                )
+            prev = curr
+        return prev[-1]
 
     def get_llm(self):
         if self.llm:
