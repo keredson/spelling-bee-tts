@@ -9,6 +9,12 @@ System dependencies (Ubuntu):
 sudo apt install python3-gi gir1.2-gtk-4.0 mpv
 ```
 
+System dependencies (macOS with Homebrew):
+
+```
+brew install python gtk4 pygobject3 gobject-introspection mpv
+```
+
 Python dependencies:
 
 ```
