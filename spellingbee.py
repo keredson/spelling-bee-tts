@@ -94,6 +94,11 @@ class SpellingBeeApp(Gtk.Application):
         self.llm_model_path = None
         self.current_sentence = None
         self._sentence_generation_id = 0
+        self.current_definition = None
+        self._definition_generation_id = 0
+        self.is_speaking = False
+        self.is_defining = False
+        self.is_generating_sentence = False
         self.profile_id = None
         self.profile_name = None
         self.profile_grade = None
@@ -114,7 +119,7 @@ class SpellingBeeApp(Gtk.Application):
         self.difficulty_std = None
         self.difficulty_sorted = None
         self.word_sample_size = 1000
-        self.word_sigma = 200.0
+        self.word_sigma = 100.0
         self.awaiting_continue = False
         self.css_provider = None
         self.word_prompt_text = "Listen and type the spelling."
@@ -176,6 +181,19 @@ class SpellingBeeApp(Gtk.Application):
         sentence_box.append(self.sentence_label)
         sentence_box.append(self.sentence_spinner)
         self.sentence_button.set_child(sentence_box)
+        self.sentence_button.set_sensitive(False)
+
+        self.define_button = Gtk.Button()
+        self.define_button.set_tooltip_text("Hear a simple definition")
+        self.define_button.connect("clicked", self.on_define)
+        self.define_label = Gtk.Label(label="Define")
+        self.define_spinner = Gtk.Spinner()
+        self.define_spinner.set_visible(False)
+        define_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        define_box.append(self.define_label)
+        define_box.append(self.define_spinner)
+        self.define_button.set_child(define_box)
+        self.define_button.set_sensitive(False)
 
         self.button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.button_row.set_halign(Gtk.Align.FILL)
@@ -184,6 +202,7 @@ class SpellingBeeApp(Gtk.Application):
         button_spacer.set_hexpand(True)
         self.button_row.append(button_spacer)
         self.button_row.append(self.say_again_button)
+        self.button_row.append(self.define_button)
         self.button_row.append(self.sentence_button)
 
         outer.append(self.header)
@@ -952,6 +971,9 @@ class SpellingBeeApp(Gtk.Application):
 
         self.current_word = word
         self.current_sentence = None
+        self.current_definition = None
+        self.update_define_button_state()
+        self.update_sentence_button_state()
         self.entry.set_text("")
         difficulty = self.get_word_difficulty(self.current_word)
         word_rating = self.word_rating_from_difficulty(difficulty)
@@ -961,6 +983,7 @@ class SpellingBeeApp(Gtk.Application):
         self.word_label.set_text(self.word_prompt_text)
         self.focus_entry()
         self.speak("Please spell: " + self.current_word)
+        self.prefetch_definition(self.current_word, allow_download=False)
         self.prefetch_sentence(self.current_word, allow_download=False)
 
     def pick_next_word(self):
@@ -1132,6 +1155,16 @@ class SpellingBeeApp(Gtk.Application):
             return
         self.prefetch_sentence(self.current_word, allow_download=True)
 
+    def on_define(self, _button):
+        if not self.current_word:
+            return
+
+        if self.current_definition:
+            self.speak(self.current_definition)
+            self.focus_entry()
+            return
+        self.prefetch_definition(self.current_word, allow_download=True)
+
     def update_score(self):
         rating_text = self.format_estimated_level()
         if rating_text:
@@ -1273,8 +1306,10 @@ class SpellingBeeApp(Gtk.Application):
         return False
 
     def set_say_again_busy(self, busy):
+        self.is_speaking = busy
         self.say_again_button.set_sensitive(not busy)
-        self.sentence_button.set_sensitive(not busy)
+        self.update_define_button_state()
+        self.update_sentence_button_state()
         self.say_again_spinner.set_visible(False)
         #self.say_again_label.set_text("Speaking..." if busy else "Say it Again")
         if busy:
@@ -1288,14 +1323,44 @@ class SpellingBeeApp(Gtk.Application):
             self.say_again_spinner.stop()
 
     def set_sentence_busy(self, busy):
-        self.sentence_button.set_sensitive(not busy)
+        self.is_generating_sentence = busy
         self.sentence_spinner.set_visible(busy)
-        self.sentence_label.set_text("Generating sentence..." if busy else "Use in a Sentence")
+        #self.sentence_label.set_text("Generating sentence..." if busy else "Use in a Sentence")
         if busy:
             self.sentence_spinner.start()
         else:
             self.sentence_spinner.stop()
+        self.update_sentence_button_state()
 
+    def set_define_busy(self, busy):
+        self.is_defining = busy
+        self.define_spinner.set_visible(busy)
+        #self.define_label.set_text("Generating definition..." if busy else "Define")
+        if busy:
+            self.define_spinner.start()
+        else:
+            self.define_spinner.stop()
+        self.update_define_button_state()
+
+    def update_define_button_state(self):
+        if not getattr(self, "define_button", None):
+            return
+        enabled = (
+            self.current_definition is not None
+            and not self.is_defining
+            and not self.is_speaking
+        )
+        self.define_button.set_sensitive(enabled)
+
+    def update_sentence_button_state(self):
+        if not getattr(self, "sentence_button", None):
+            return
+        enabled = (
+            self.current_sentence is not None
+            and not self.is_generating_sentence
+            and not self.is_speaking
+        )
+        self.sentence_button.set_sensitive(enabled)
     def log_attempt(self, guess):
         if not self.tracking_conn or not self.profile_id or not self.current_word:
             return
@@ -1661,6 +1726,29 @@ class SpellingBeeApp(Gtk.Application):
         print(text)
         return text
 
+    def generate_definition(self, word):
+        print('generate_definition', word)
+        llm = self.get_llm()
+        prompt = (
+            "You are a spelling bee announcer. Provide a short, simple definition "
+            "of the word that a student would understand. "
+            "Use one sentence, fewer than 15 words. Do not use the word itself.\n\n"
+            f'Word: "{word}"\n'
+            "Definition:\n"
+        )
+        print('prompt', prompt)
+        result = llm(
+            prompt,
+            max_tokens=48,
+            temperature=float(os.environ.get("LLM_TEMPERATURE", "0.7")),
+            top_p=float(os.environ.get("LLM_TOP_P", "0.9")),
+            stop=["\n"],
+        )
+        print('result', result)
+        text = (result.get("choices") or [{}])[0].get("text", "").strip()
+        print(text)
+        return text
+
     def prefetch_sentence(self, word, allow_download):
         if not allow_download and not self.get_cached_model_path():
             return
@@ -1681,6 +1769,7 @@ class SpellingBeeApp(Gtk.Application):
                         return
                     if self.current_word == word:
                         self.current_sentence = sentence
+                        GLib.idle_add(self.update_sentence_button_state)
                 except Exception as exc:
                     GLib.idle_add(
                         self.show_error_dialog,
@@ -1690,6 +1779,41 @@ class SpellingBeeApp(Gtk.Application):
                 finally:
                     if generation_id == self._sentence_generation_id:
                         GLib.idle_add(self.set_sentence_busy, False)
+                    GLib.idle_add(self.ensure_entry_focus)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def prefetch_definition(self, word, allow_download):
+        if not allow_download and not self.get_cached_model_path():
+            return
+        self._definition_generation_id += 1
+        generation_id = self._definition_generation_id
+
+        def run():
+            with self.llm_lock:
+                GLib.idle_add(self.set_define_busy, True)
+                try:
+                    definition = self.generate_definition(word)
+                    if not definition:
+                        GLib.idle_add(
+                            self.show_error_dialog,
+                            "Definition generation failed",
+                            "Definition generation returned no text.",
+                        )
+                        return
+                    if self.current_word == word:
+                        self.current_definition = definition
+                        GLib.idle_add(self.update_define_button_state)
+                        # Precompute only; speaking happens on user action.
+                except Exception as exc:
+                    GLib.idle_add(
+                        self.show_error_dialog,
+                        "Definition generation failed",
+                        str(exc),
+                    )
+                finally:
+                    if generation_id == self._definition_generation_id:
+                        GLib.idle_add(self.set_define_busy, False)
                     GLib.idle_add(self.ensure_entry_focus)
 
         threading.Thread(target=run, daemon=True).start()
