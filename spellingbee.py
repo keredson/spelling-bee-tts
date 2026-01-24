@@ -128,6 +128,7 @@ class SpellingBeeApp(Gtk.Application):
         self.profile_last_selected_index = None
         self.profile_create_confirmed = False
         self.settings = None
+        self.force_update_check = False
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -1859,6 +1860,9 @@ class SpellingBeeApp(Gtk.Application):
         self.window.set_default_size(520, -1)
 
     def maybe_check_for_updates(self):
+        if self.force_update_check:
+            self.force_update_check = False
+            self.settings["last_update_check"] = 0
         last_check = self.settings.get("last_update_check", 0)
         now = int(time.time())
         if now - last_check < 7 * 24 * 60 * 60:
@@ -2050,7 +2054,11 @@ class SpellingBeeApp(Gtk.Application):
 
 
 def main():
+    force_update = "--update" in sys.argv
+    if force_update:
+        sys.argv = [arg for arg in sys.argv if arg != "--update"]
     app = SpellingBeeApp()
+    app.force_update_check = force_update
     app.run(sys.argv)
 
 
