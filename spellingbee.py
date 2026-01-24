@@ -21,7 +21,8 @@ import random
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk
+gi.require_version("Gdk", "4.0")
+from gi.repository import GLib, Gtk, Gdk
 
 import edge_tts
 
@@ -68,6 +69,7 @@ class SpellingBeeApp(Gtk.Application):
         self.word_sample_size = 500
         self.word_sigma = 200.0
         self.awaiting_continue = False
+        self.css_provider = None
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -94,6 +96,7 @@ class SpellingBeeApp(Gtk.Application):
         self.entry = Gtk.Entry()
         self.entry.set_placeholder_text("Type your spelling here")
         self.entry.connect("activate", self.on_submit)
+        self.ensure_css()
 
         self.submit_button = Gtk.Button(label="Check")
         self.submit_button.connect("clicked", self.on_submit)
@@ -672,6 +675,7 @@ class SpellingBeeApp(Gtk.Application):
         self.awaiting_continue = False
         self.entry.set_editable(True)
         self.submit_button.set_label("Check")
+        self.set_entry_feedback_icon(None)
         word = self.pick_next_word()
         if not word:
             self.word_label.set_text("No words available.")
@@ -760,6 +764,7 @@ class SpellingBeeApp(Gtk.Application):
             self.awaiting_continue = False
             self.entry.set_editable(True)
             self.submit_button.set_label("Check")
+            self.set_entry_feedback_icon(None)
             self.next_word()
             return
         if not self.current_word:
@@ -773,9 +778,11 @@ class SpellingBeeApp(Gtk.Application):
         self.log_attempt(guess)
         if guess.lower() == self.current_word.lower():
             self.correct += 1
+            self.set_entry_feedback_icon("emblem-ok-symbolic")
             self.word_label.set_text("Correct! Next word...")
             self.speak("That is correct!", on_done=self.after_feedback)
         else:
+            self.set_entry_feedback_icon("dialog-error-symbolic")
             self.word_label.set_text(f"Incorrect. It was: {self.current_word}")
             self.awaiting_continue = True
             self.entry.set_editable(False)
@@ -786,6 +793,38 @@ class SpellingBeeApp(Gtk.Application):
             )
 
         self.update_score()
+
+    def set_entry_feedback_icon(self, icon_name):
+        self.entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY, icon_name
+        )
+        self.entry.remove_css_class("correct")
+        self.entry.remove_css_class("incorrect")
+        if icon_name == "emblem-ok-symbolic":
+            self.entry.add_css_class("correct")
+        elif icon_name == "dialog-error-symbolic":
+            self.entry.add_css_class("incorrect")
+
+    def ensure_css(self):
+        if self.css_provider:
+            return
+        provider = Gtk.CssProvider()
+        provider.load_from_data(
+            b"""
+            entry.correct image {
+                color: #2e7d32;
+            }
+            entry.incorrect image {
+                color: #c62828;
+            }
+            """
+        )
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+        self.css_provider = provider
 
     def after_feedback(self):
         self.next_word()
