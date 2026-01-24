@@ -70,6 +70,9 @@ class SpellingBeeApp(Gtk.Application):
         self.word_sigma = 200.0
         self.awaiting_continue = False
         self.css_provider = None
+        self.word_prompt_text = "Listen and type the spelling."
+        self.entry_feedback_icon_name = None
+        self.entry_icon_override = None
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -94,7 +97,7 @@ class SpellingBeeApp(Gtk.Application):
         self.word_label.set_xalign(0.0)
 
         self.entry = Gtk.Entry()
-        self.entry.set_placeholder_text("Type your spelling here")
+        self.entry.set_placeholder_text("Type the word here...")
         self.entry.connect("activate", self.on_submit)
         self.ensure_css()
 
@@ -103,7 +106,7 @@ class SpellingBeeApp(Gtk.Application):
 
         self.say_again_button = Gtk.Button()
         self.say_again_button.connect("clicked", self.on_say_again)
-        self.say_again_label = Gtk.Label(label="Say Again")
+        self.say_again_label = Gtk.Label(label="Say it Again")
         self.say_again_spinner = Gtk.Spinner()
         self.say_again_spinner.set_visible(False)
         say_again_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -684,7 +687,12 @@ class SpellingBeeApp(Gtk.Application):
         self.current_word = word
         self.current_sentence = None
         self.entry.set_text("")
-        self.word_label.set_text("Listen and type the spelling.")
+        difficulty = self.get_word_difficulty(self.current_word)
+        word_rating = self.word_rating_from_difficulty(difficulty)
+        self.word_prompt_text = (
+            f"Listen and type the spelling.  (word difficulty: {int(word_rating)})"
+        )
+        self.word_label.set_text(self.word_prompt_text)
         self.focus_entry()
         self.speak("Please spell: " + self.current_word)
         self.prefetch_sentence(self.current_word, allow_download=False)
@@ -795,6 +803,9 @@ class SpellingBeeApp(Gtk.Application):
         self.update_score()
 
     def set_entry_feedback_icon(self, icon_name):
+        self.entry_feedback_icon_name = icon_name
+        if self.entry_icon_override:
+            return
         self.entry.set_icon_from_icon_name(
             Gtk.EntryIconPosition.SECONDARY, icon_name
         )
@@ -804,6 +815,17 @@ class SpellingBeeApp(Gtk.Application):
             self.entry.add_css_class("correct")
         elif icon_name == "dialog-error-symbolic":
             self.entry.add_css_class("incorrect")
+
+    def set_entry_icon_override(self, icon_name):
+        self.entry_icon_override = icon_name
+        if icon_name:
+            self.entry.set_icon_from_icon_name(
+                Gtk.EntryIconPosition.SECONDARY, icon_name
+            )
+            self.entry.remove_css_class("correct")
+            self.entry.remove_css_class("incorrect")
+            return
+        self.set_entry_feedback_icon(self.entry_feedback_icon_name)
 
     def ensure_css(self):
         if self.css_provider:
@@ -899,7 +921,7 @@ class SpellingBeeApp(Gtk.Application):
                     if success and reset_label:
                         GLib.idle_add(
                             self.word_label.set_text,
-                            "Listen and type the spelling.",
+                            self.word_prompt_text,
                         )
                     GLib.idle_add(self.set_say_again_busy, False)
                     if on_done:
@@ -993,8 +1015,13 @@ class SpellingBeeApp(Gtk.Application):
     def set_say_again_busy(self, busy):
         self.say_again_button.set_sensitive(not busy)
         self.sentence_button.set_sensitive(not busy)
-        self.say_again_spinner.set_visible(busy)
-        self.say_again_label.set_text("Speaking..." if busy else "Say Again")
+        self.say_again_spinner.set_visible(False)
+        #self.say_again_label.set_text("Speaking..." if busy else "Say it Again")
+        if busy:
+            if not self.entry_feedback_icon_name:
+                self.set_entry_icon_override("audio-volume-high-symbolic")
+        else:
+            self.set_entry_icon_override(None)
         if busy:
             self.say_again_spinner.start()
         else:
