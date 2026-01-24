@@ -105,10 +105,10 @@ cov_hard = 1 - cov_norm
 # Irregular: binary penalty (will be normalized implicitly by weighting)
 irr = df["Irregular_Spelling_Flag"].astype(float)
 
-# Weights: frequency dominates; then syllables + irregularity; small effects from dispersion/coverage.
+# Weights: tilt more toward syllables so longer words rank harder more often.
 df["Difficulty"] = (
-    0.45 * sfi_hard +
-    0.20 * syll_norm +
+    0.25 * sfi_hard +
+    0.40 * syll_norm +
     0.20 * irr +          # binary, acts like a constant bump
     0.10 * cov_hard +
     0.05 * disp_hard
@@ -119,6 +119,7 @@ df["Difficulty_1_10"] = 1 + 9 * normalize(df["Difficulty"])
 
 # Save
 out_path = Path("words.csv.gz")
+out_path_plain = Path("words.csv")
 df_out = df[["Lemma", "Difficulty", "Coverage", "Cumulative Coverage"]].rename(
     columns={
         "Lemma": "word", 
@@ -129,6 +130,7 @@ df_out = df[["Lemma", "Difficulty", "Coverage", "Cumulative Coverage"]].rename(
 )
 df_out = df_out.sort_values("difficulty")
 df_out.to_csv(out_path, index=False)
+df_out.to_csv(out_path_plain, index=False)
 
 
-print('wrote:', out_path)
+print('wrote:', out_path, out_path_plain)
