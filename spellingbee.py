@@ -119,8 +119,11 @@ class SpellingBeeApp(Gtk.Application):
         self.sentence_button.set_child(sentence_box)
 
         self.button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.button_row.set_halign(Gtk.Align.CENTER)
+        self.button_row.set_halign(Gtk.Align.FILL)
         self.button_row.append(self.submit_button)
+        button_spacer = Gtk.Box()
+        button_spacer.set_hexpand(True)
+        self.button_row.append(button_spacer)
         self.button_row.append(self.say_again_button)
         self.button_row.append(self.sentence_button)
 
@@ -806,9 +809,9 @@ class SpellingBeeApp(Gtk.Application):
     def update_score(self):
         rating_text = self.format_estimated_level()
         if rating_text:
-            self.score_label.set_text(f"Score: {int(self.profile_rating)} - {rating_text}")
+            self.score_label.set_text(f"Rank: {int(self.profile_rating)} - {rating_text}")
         else:
-            self.score_label.set_text(f"Score: {int(self.profile_rating)}")
+            self.score_label.set_text(f"Rank: {int(self.profile_rating)}")
 
     def speak(self, text, on_done=None, reset_label=True):
         mp3_players = self.pick_mp3_players()
