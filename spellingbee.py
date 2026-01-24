@@ -27,6 +27,48 @@ from gi.repository import GLib, Gtk, Gdk
 import edge_tts
 
 
+class SettingsStore:
+    def __init__(self, app):
+        self.app = app
+
+    def _conn(self):
+        return self.app.tracking_conn
+
+    def get(self, key, default=None):
+        try:
+            row = self._conn().execute(
+                "SELECT value FROM settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+        except (AttributeError, sqlite3.Error):
+            return default
+        if not row:
+            return default
+        try:
+            return json.loads(row[0])
+        except json.JSONDecodeError:
+            return row[0]
+
+    def __setitem__(self, key, value):
+        try:
+            self._conn().execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, json.dumps(value)),
+            )
+            self._conn().commit()
+        except (AttributeError, sqlite3.Error):
+            return
+
+    def pop(self, key, default=None):
+        current = self.get(key, default)
+        try:
+            self._conn().execute("DELETE FROM settings WHERE key = ?", (key,))
+            self._conn().commit()
+        except (AttributeError, sqlite3.Error):
+            return current
+        return current
+
+
 class SpellingBeeApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="org.pypi.project.spelling-bee-tts")
@@ -39,7 +81,6 @@ class SpellingBeeApp(Gtk.Application):
         self.total = 0
         self.tts_lock = threading.Lock()
         self.edge_voice = os.environ.get("EDGE_TTS_VOICE", "en-US-AriaNeural")
-        self.settings_path = self.get_config_path() / "settings.json"
         self.audio_cache = {}
         self.audio_dir = tempfile.TemporaryDirectory()
         self.llm = None
@@ -79,6 +120,7 @@ class SpellingBeeApp(Gtk.Application):
         self.entry_icon_override = None
         self.profile_last_selected_index = None
         self.profile_create_confirmed = False
+        self.settings = None
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -202,6 +244,7 @@ class SpellingBeeApp(Gtk.Application):
             self.tracking_conn = sqlite3.connect(str(db_path))
             self.tracking_conn.execute("PRAGMA foreign_keys = ON")
             self.ensure_tracking_schema()
+            self.settings = SettingsStore(self)
         except sqlite3.Error as exc:
             self.show_error_dialog("Database error", str(exc))
 
@@ -239,13 +282,25 @@ class SpellingBeeApp(Gtk.Application):
             self.tracking_conn.execute(
                 "CREATE INDEX attempts_profile_time ON attempts(profile_id, created_at)"
             )
-            self.tracking_conn.execute("PRAGMA user_version = 3")
+            self.tracking_conn.execute(
+                """
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            self.tracking_conn.execute("PRAGMA user_version = 4")
             self.tracking_conn.commit()
         elif version == 1:
             self.migrate_profiles_to_int()
             self.migrate_add_profile_ratings()
+            self.migrate_add_settings()
         elif version == 2:
             self.migrate_add_profile_ratings()
+            self.migrate_add_settings()
+        elif version == 3:
+            self.migrate_add_settings()
 
     def migrate_profiles_to_int(self):
         if not self.tracking_conn:
@@ -318,6 +373,23 @@ class SpellingBeeApp(Gtk.Application):
             )
         self.tracking_conn.execute("PRAGMA user_version = 3")
         self.tracking_conn.commit()
+
+    def migrate_add_settings(self):
+        if not self.tracking_conn:
+            return
+        try:
+            self.tracking_conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            self.tracking_conn.execute("PRAGMA user_version = 4")
+            self.tracking_conn.commit()
+        except sqlite3.Error:
+            return
 
     def load_profiles(self):
         if not self.tracking_conn:
@@ -426,7 +498,11 @@ class SpellingBeeApp(Gtk.Application):
         model = Gtk.StringList.new(labels)
         self.profile_dropdown.set_model(model)
         if profiles:
-            self.profile_dropdown.set_selected(1)
+            selected_index = 1
+            last_profile_id = self.settings.get("last_profile_id")
+            if last_profile_id in self.profile_ids:
+                selected_index = self.profile_ids.index(last_profile_id)
+            self.profile_dropdown.set_selected(selected_index)
             self.profile_start_button.set_sensitive(True)
             if self.profile_history_button:
                 self.profile_history_button.set_sensitive(True)
@@ -495,6 +571,7 @@ class SpellingBeeApp(Gtk.Application):
             self.profile_grade = row[1]
             self.profile_rating = row[2]
             self.profile_attempts = row[3] or 0
+            self.settings["last_profile_id"] = profile_id
             if self.profile_rating is None:
                 self.profile_rating = self.grade_to_rating(self.profile_grade)
                 self.tracking_conn.execute(
@@ -702,6 +779,8 @@ class SpellingBeeApp(Gtk.Application):
         except sqlite3.Error as exc:
             self.show_error_dialog("Profile error", str(exc))
             return
+        if self.settings.get("last_profile_id") == profile_id:
+            self.settings.pop("last_profile_id", None)
         self.refresh_profile_dropdown()
 
     def on_create_profile_confirm(self, _button, dialog, name_entry, grade_dropdown):
@@ -1109,12 +1188,6 @@ class SpellingBeeApp(Gtk.Application):
                         GLib.idle_add(on_done)
 
         threading.Thread(target=run, daemon=True).start()
-
-    def get_config_path(self):
-        config_home = os.environ.get("XDG_CONFIG_HOME")
-        if config_home:
-            return Path(config_home) / "spellingbee"
-        return Path.home() / ".config" / "spellingbee"
 
     def get_data_path(self):
         data_home = os.environ.get("XDG_DATA_HOME")
@@ -1622,13 +1695,11 @@ class SpellingBeeApp(Gtk.Application):
         self.window.set_default_size(520, -1)
 
     def maybe_check_for_updates(self):
-        settings = self.load_settings()
-        last_check = settings.get("last_update_check", 0)
+        last_check = self.settings.get("last_update_check", 0)
         now = int(time.time())
         if now - last_check < 7 * 24 * 60 * 60:
             return
-        settings["last_update_check"] = now
-        self.save_settings(settings)
+        self.settings["last_update_check"] = now
 
         def run():
             latest = self.fetch_latest_version()
@@ -1719,21 +1790,6 @@ class SpellingBeeApp(Gtk.Application):
         a_parts = parts(a)
         b_parts = parts(b)
         return (a_parts > b_parts) - (a_parts < b_parts)
-
-    def load_settings(self):
-        if not self.settings_path.exists():
-            return {}
-        try:
-            return json.loads(self.settings_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-    def save_settings(self, data):
-        try:
-            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
-            self.settings_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except OSError:
-            pass
 
     def check_system_dependencies(self, window):
         missing = []
