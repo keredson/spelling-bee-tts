@@ -610,6 +610,7 @@ class SpellingBeeApp(Gtk.Application):
             self.profile_window = None
             self.profile_allow_close = False
         self.load_default_words()
+        self.maybe_download_llm_model()
 
     def on_history_clicked(self, _button):
         if not self.tracking_conn or not self.profile_dropdown:
@@ -1361,6 +1362,30 @@ class SpellingBeeApp(Gtk.Application):
             and not self.is_speaking
         )
         self.sentence_button.set_sensitive(enabled)
+
+    def maybe_download_llm_model(self):
+        if self.get_cached_model_path():
+            return
+
+        def run():
+            try:
+                self.ensure_model_path()
+            except Exception as exc:
+                GLib.idle_add(
+                    self.show_error_dialog,
+                    "Model download failed",
+                    str(exc),
+                )
+                return
+            if self.current_word:
+                GLib.idle_add(
+                    self.prefetch_definition, self.current_word, False
+                )
+                GLib.idle_add(
+                    self.prefetch_sentence, self.current_word, False
+                )
+
+        threading.Thread(target=run, daemon=True).start()
     def log_attempt(self, guess):
         if not self.tracking_conn or not self.profile_id or not self.current_word:
             return
