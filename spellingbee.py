@@ -108,9 +108,11 @@ class SpellingBeeApp(Gtk.Application):
         self.ensure_css()
 
         self.submit_button = Gtk.Button(label="Check")
+        self.submit_button.set_tooltip_text("Check spelling")
         self.submit_button.connect("clicked", self.on_submit)
 
         self.say_again_button = Gtk.Button()
+        self.say_again_button.set_tooltip_text("Hear the word again")
         self.say_again_button.connect("clicked", self.on_say_again)
         self.say_again_label = Gtk.Label(label="Say it Again")
         self.say_again_spinner = Gtk.Spinner()
@@ -121,6 +123,7 @@ class SpellingBeeApp(Gtk.Application):
         self.say_again_button.set_child(say_again_box)
 
         self.sentence_button = Gtk.Button()
+        self.sentence_button.set_tooltip_text("Hear an example sentence")
         self.sentence_button.connect("clicked", self.on_use_sentence)
         self.sentence_label = Gtk.Label(label="Use in a Sentence")
         self.sentence_spinner = Gtk.Spinner()
@@ -360,15 +363,18 @@ class SpellingBeeApp(Gtk.Application):
         button_row.set_halign(Gtk.Align.FILL)
 
         self.profile_delete_button = Gtk.Button()
+        self.profile_delete_button.set_tooltip_text("Delete selected profile")
         delete_icon = Gtk.Image.new_from_icon_name("user-trash-symbolic")
         self.profile_delete_button.set_child(delete_icon)
         self.profile_delete_button.set_halign(Gtk.Align.START)
         self.profile_delete_button.connect("clicked", self.on_delete_profile_clicked)
         self.profile_history_button = Gtk.Button()
+        self.profile_history_button.set_tooltip_text("View attempt history")
         history_icon = Gtk.Image.new_from_icon_name("view-history-symbolic")
         self.profile_history_button.set_child(history_icon)
         self.profile_history_button.connect("clicked", self.on_history_clicked)
         self.profile_start_button = Gtk.Button()
+        self.profile_start_button.set_tooltip_text("Start game with selected profile")
         start_icon = Gtk.Image.new_from_icon_name("media-playback-start-symbolic")
         start_label = Gtk.Label(label="Start Game")
         start_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -583,6 +589,7 @@ class SpellingBeeApp(Gtk.Application):
         box.append(scroller)
 
         close_button = Gtk.Button(label="Close")
+        close_button.set_tooltip_text("Close this window")
         close_button.connect("clicked", lambda _b: dialog.close())
         close_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         close_row.set_halign(Gtk.Align.END)
@@ -622,6 +629,8 @@ class SpellingBeeApp(Gtk.Application):
         button_row.set_halign(Gtk.Align.END)
         cancel_button = Gtk.Button(label="Cancel")
         create_button = Gtk.Button(label="Create")
+        cancel_button.set_tooltip_text("Cancel profile creation")
+        create_button.set_tooltip_text("Create the profile")
 
         cancel_button.connect("clicked", lambda _b: dialog.close())
         name_entry.connect(
@@ -968,8 +977,7 @@ class SpellingBeeApp(Gtk.Application):
             self.entry.set_editable(False)
             self.submit_button.set_label("Continue")
             self.speak(
-                f"Sorry, that is not correct, the correct spelling is: {'. '.join(self.current_word)}"
-                ,
+                f"Sorry, that is not correct, the correct spelling is: {'. '.join(self.current_word)}",
             )
 
         self.update_score()
@@ -1034,7 +1042,7 @@ class SpellingBeeApp(Gtk.Application):
             return
 
         if self.current_sentence:
-            self.speak(self.current_sentence, reset_label=False)
+            self.speak(self.current_sentence)
             self.focus_entry()
             return
         self.prefetch_sentence(self.current_word, allow_download=True)
@@ -1046,10 +1054,13 @@ class SpellingBeeApp(Gtk.Application):
         else:
             self.score_label.set_text(f"Rank: {int(self.profile_rating)}")
 
-    def speak(self, text, on_done=None, reset_label=True):
+    def speak(self, text, on_done=None):
         mp3_players = self.pick_mp3_players()
         if not mp3_players:
-            self.word_label.set_text("Install mpv/ffplay/mpg123 to play TTS audio.")
+            self.show_error_dialog(
+                "Audio error",
+                "Install mpv, ffplay, or mpg123 to play TTS audio.",
+            )
             return
 
         def run():
@@ -1070,7 +1081,8 @@ class SpellingBeeApp(Gtk.Application):
                         size = output_path.stat().st_size
                         if size == 0:
                             GLib.idle_add(
-                                self.word_label.set_text,
+                                self.show_error_dialog,
+                                "Audio error",
                                 "TTS produced empty audio. Check network access.",
                             )
                             return
@@ -1079,22 +1091,19 @@ class SpellingBeeApp(Gtk.Application):
 
                     if not ok:
                         GLib.idle_add(
-                            self.word_label.set_text,
+                            self.show_error_dialog,
+                            "Audio error",
                             "Audio playback failed. Check your sound device.",
                         )
                     else:
                         success = True
                 except Exception as exc:
                     GLib.idle_add(
-                        self.word_label.set_text,
+                        self.show_error_dialog,
+                        "Audio error",
                         f"TTS failed: {exc}",
                     )
                 finally:
-                    if success and reset_label:
-                        GLib.idle_add(
-                            self.word_label.set_text,
-                            self.word_prompt_text,
-                        )
                     GLib.idle_add(self.set_say_again_busy, False)
                     if on_done:
                         GLib.idle_add(on_done)
