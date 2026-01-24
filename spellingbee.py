@@ -59,6 +59,7 @@ class SpellingBeeApp(Gtk.Application):
         self.profile_dropdown = None
         self.profile_start_button = None
         self.profile_delete_button = None
+        self.profile_history_button = None
         self.profile_ids = []
         self.profile_real_count = 0
         self.profile_create_marker = object()
@@ -363,6 +364,10 @@ class SpellingBeeApp(Gtk.Application):
         self.profile_delete_button.set_child(delete_icon)
         self.profile_delete_button.set_halign(Gtk.Align.START)
         self.profile_delete_button.connect("clicked", self.on_delete_profile_clicked)
+        self.profile_history_button = Gtk.Button()
+        history_icon = Gtk.Image.new_from_icon_name("view-history-symbolic")
+        self.profile_history_button.set_child(history_icon)
+        self.profile_history_button.connect("clicked", self.on_history_clicked)
         self.profile_start_button = Gtk.Button()
         start_icon = Gtk.Image.new_from_icon_name("media-playback-start-symbolic")
         start_label = Gtk.Label(label="Start Game")
@@ -370,12 +375,14 @@ class SpellingBeeApp(Gtk.Application):
         start_box.append(start_icon)
         start_box.append(start_label)
         self.profile_start_button.set_child(start_box)
+        self.profile_start_button.add_css_class("start-button")
         self.profile_start_button.connect("clicked", self.on_profile_start_clicked)
 
         button_row.append(self.profile_delete_button)
         button_spacer = Gtk.Box()
         button_spacer.set_hexpand(True)
         button_row.append(button_spacer)
+        button_row.append(self.profile_history_button)
         button_row.append(self.profile_start_button)
         box.append(button_row)
 
@@ -415,9 +422,13 @@ class SpellingBeeApp(Gtk.Application):
         if profiles:
             self.profile_dropdown.set_selected(1)
             self.profile_start_button.set_sensitive(True)
+            if self.profile_history_button:
+                self.profile_history_button.set_sensitive(True)
         else:
             self.profile_dropdown.set_selected(0)
             self.profile_start_button.set_sensitive(False)
+            if self.profile_history_button:
+                self.profile_history_button.set_sensitive(False)
         if self.profile_delete_button:
             self.profile_delete_button.set_sensitive(bool(profiles))
 
@@ -430,20 +441,28 @@ class SpellingBeeApp(Gtk.Application):
         if index < 0 or index >= len(self.profile_ids):
             self.profile_delete_button.set_sensitive(False)
             self.profile_start_button.set_sensitive(False)
+            if self.profile_history_button:
+                self.profile_history_button.set_sensitive(False)
             return
         profile_id = self.profile_ids[index]
         if profile_id is self.profile_placeholder_marker:
             self.profile_delete_button.set_sensitive(False)
             self.profile_start_button.set_sensitive(False)
+            if self.profile_history_button:
+                self.profile_history_button.set_sensitive(False)
             return
         if profile_id is self.profile_create_marker:
             self.profile_delete_button.set_sensitive(False)
             self.profile_start_button.set_sensitive(False)
+            if self.profile_history_button:
+                self.profile_history_button.set_sensitive(False)
             self.on_create_profile_clicked(None)
             return
         self.profile_last_selected_index = index
         self.profile_delete_button.set_sensitive(True)
         self.profile_start_button.set_sensitive(True)
+        if self.profile_history_button:
+            self.profile_history_button.set_sensitive(True)
 
     def on_profile_close_request(self, _window):
         if self.profile_allow_close:
@@ -487,6 +506,91 @@ class SpellingBeeApp(Gtk.Application):
             self.profile_window = None
             self.profile_allow_close = False
         self.load_default_words()
+
+    def on_history_clicked(self, _button):
+        if not self.tracking_conn or not self.profile_dropdown:
+            self.show_error_dialog("History", "No profile selected.")
+            return
+        index = self.profile_dropdown.get_selected()
+        if index < 0 or index >= len(self.profile_ids):
+            self.show_error_dialog("History", "No profile selected.")
+            return
+        profile_id = self.profile_ids[index]
+        if profile_id in (self.profile_placeholder_marker, self.profile_create_marker):
+            self.show_error_dialog("History", "No profile selected.")
+            return
+        rows = self.tracking_conn.execute(
+            """
+            SELECT word, attempt, edit_distance, created_at
+            FROM attempts
+            WHERE profile_id = ?
+            ORDER BY created_at DESC
+            """,
+            (profile_id,),
+        ).fetchall()
+        dialog = Gtk.Window(
+            transient_for=self.profile_window or self.window,
+            modal=True,
+            title="Attempt history",
+        )
+        dialog.set_default_size(520, 360)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        header = Gtk.Label(label=f"Attempts: {len(rows)}")
+        header.set_xalign(0.0)
+        box.append(header)
+
+        size_groups = [
+            Gtk.SizeGroup.new(Gtk.SizeGroupMode.HORIZONTAL) for _ in range(4)
+        ]
+        header_grid = Gtk.Grid()
+        header_grid.set_column_spacing(12)
+        headers = ["When", "Word", "Your Spelling", "Accuracy"]
+        for col, text in enumerate(headers):
+            label = Gtk.Label(label=text)
+            label.set_xalign(0.0)
+            header_grid.attach(label, col, 0, 1, 1)
+            size_groups[col].add_widget(label)
+        box.append(header_grid)
+
+        list_box = Gtk.ListBox()
+        list_box.set_selection_mode(Gtk.SelectionMode.NONE)
+        for word, attempt, edit_distance, created_at in rows:
+            when = time.strftime("%x %X", time.localtime(created_at))
+            length = max(len(word), 1)
+            accuracy = max(0.0, 1.0 - (edit_distance / length))
+            accuracy_text = f"{int(round(accuracy * 100))}%"
+            row_grid = Gtk.Grid()
+            row_grid.set_column_spacing(12)
+            row_labels = [when, word, attempt, accuracy_text]
+            for col, text in enumerate(row_labels):
+                label = Gtk.Label(label=str(text))
+                label.set_xalign(0.0)
+                row_grid.attach(label, col, 0, 1, 1)
+                size_groups[col].add_widget(label)
+            list_row = Gtk.ListBoxRow()
+            list_row.set_child(row_grid)
+            list_box.append(list_row)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_hexpand(True)
+        scroller.set_vexpand(True)
+        scroller.set_child(list_box)
+        box.append(scroller)
+
+        close_button = Gtk.Button(label="Close")
+        close_button.connect("clicked", lambda _b: dialog.close())
+        close_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        close_row.set_halign(Gtk.Align.END)
+        close_row.append(close_button)
+        box.append(close_row)
+
+        dialog.set_child(box)
+        dialog.present()
 
     def on_create_profile_clicked(self, _button):
         self.profile_create_confirmed = False
