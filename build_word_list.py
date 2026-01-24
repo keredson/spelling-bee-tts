@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 import pronouncing
 import pandas as pd
+import numpy as np
 
 in_path = Path("NGSLwithSFI-31K.xlsx")
 df = pd.read_excel(in_path)
@@ -88,9 +89,19 @@ def normalize(series: pd.Series) -> pd.Series:
         return s.fillna(0) * 0
     return (s.fillna(mn) - mn) / (mx - mn)
 
-# SFI: higher = easier, so invert after normalization
-sfi_norm = normalize(df["SFI"])
-sfi_hard = 1 - sfi_norm
+def zscore(series: pd.Series) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce")
+    mean = s.mean()
+    std = s.std()
+    if pd.isna(mean) or pd.isna(std) or std == 0:
+        return s.fillna(0) * 0
+    return (s.fillna(mean) - mean) / std
+
+def logistic(series: pd.Series) -> pd.Series:
+    return 1.0 / (1.0 + np.exp((-series).clip(-12, 12)))
+
+# SFI is already log-scaled; use z-score + logistic to avoid min-max stretching.
+sfi_hard = 1 - logistic(zscore(df["SFI"]))
 
 syll_norm = normalize(df["Syllables"])
 

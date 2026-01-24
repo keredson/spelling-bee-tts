@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from bisect import bisect_left
 from pathlib import Path
 import math
 import random
@@ -111,7 +112,8 @@ class SpellingBeeApp(Gtk.Application):
         self.profile_attempts = 0
         self.difficulty_mean = None
         self.difficulty_std = None
-        self.word_sample_size = 500
+        self.difficulty_sorted = None
+        self.word_sample_size = 1000
         self.word_sigma = 200.0
         self.awaiting_continue = False
         self.css_provider = None
@@ -921,6 +923,10 @@ class SpellingBeeApp(Gtk.Application):
         std = math.sqrt(variance)
         self.difficulty_mean = mean
         self.difficulty_std = std if std > 0 else None
+        rows = conn.execute(
+            "SELECT difficulty FROM words WHERE difficulty IS NOT NULL"
+        ).fetchall()
+        self.difficulty_sorted = sorted(row[0] for row in rows)
 
     def parse_float(self, value):
         if value is None or value == "":
@@ -1367,6 +1373,15 @@ class SpellingBeeApp(Gtk.Application):
     def word_rating_from_difficulty(self, difficulty):
         if difficulty is None:
             return 1000.0
+        if self.difficulty_sorted:
+            count = len(self.difficulty_sorted)
+            if count == 1:
+                percentile = 0.5
+            else:
+                index = bisect_left(self.difficulty_sorted, difficulty)
+                index = max(0, min(index, count - 1))
+                percentile = index / (count - 1)
+            return 800.0 + 640.0 * percentile
         if self.difficulty_std:
             z = (difficulty - self.difficulty_mean) / self.difficulty_std
             z = max(-2.5, min(2.5, z))
