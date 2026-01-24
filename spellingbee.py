@@ -60,6 +60,9 @@ class SpellingBeeApp(Gtk.Application):
         self.profile_start_button = None
         self.profile_delete_button = None
         self.profile_ids = []
+        self.profile_real_count = 0
+        self.profile_create_marker = object()
+        self.profile_placeholder_marker = object()
         self.profile_allow_close = False
         self.grade_levels = self.build_grade_levels()
         self.profile_rating = None
@@ -73,6 +76,8 @@ class SpellingBeeApp(Gtk.Application):
         self.word_prompt_text = "Listen and type the spelling."
         self.entry_feedback_icon_name = None
         self.entry_icon_override = None
+        self.profile_last_selected_index = None
+        self.profile_create_confirmed = False
 
     def do_activate(self):
         self.window = Gtk.ApplicationWindow(application=self)
@@ -353,14 +358,11 @@ class SpellingBeeApp(Gtk.Application):
         button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         button_row.set_halign(Gtk.Align.END)
 
-        create_button = Gtk.Button(label="Create profile")
-        create_button.connect("clicked", self.on_create_profile_clicked)
         self.profile_delete_button = Gtk.Button(label="Delete profile")
         self.profile_delete_button.connect("clicked", self.on_delete_profile_clicked)
-        self.profile_start_button = Gtk.Button(label="Start")
+        self.profile_start_button = Gtk.Button(label="Start Game")
         self.profile_start_button.connect("clicked", self.on_profile_start_clicked)
 
-        button_row.append(create_button)
         button_row.append(self.profile_delete_button)
         button_row.append(self.profile_start_button)
         box.append(button_row)
@@ -369,15 +371,17 @@ class SpellingBeeApp(Gtk.Application):
         window.present()
         self.profile_window = window
         self.refresh_profile_dropdown()
-        if not self.profile_ids:
+        if self.profile_real_count == 0:
             self.on_create_profile_clicked(None)
 
     def refresh_profile_dropdown(self):
         if not self.profile_dropdown:
             return
         profiles = self.load_profiles()
-        self.profile_ids = [profile["id"] for profile in profiles]
+        self.profile_real_count = len(profiles)
+        self.profile_ids = [self.profile_placeholder_marker]
         labels = []
+        labels.append("Select a profile...")
         for profile in profiles:
             name = profile["name"]
             ability_rating = profile.get("ability_rating")
@@ -391,25 +395,43 @@ class SpellingBeeApp(Gtk.Application):
                 labels.append(f"{name} ({grade_text})")
             else:
                 labels.append(name)
+            self.profile_ids.append(profile["id"])
+        labels.append("Create new profile...")
+        self.profile_ids.append(self.profile_create_marker)
         model = Gtk.StringList.new(labels)
         self.profile_dropdown.set_model(model)
-        if labels:
-            self.profile_dropdown.set_selected(0)
+        if profiles:
+            self.profile_dropdown.set_selected(1)
             self.profile_start_button.set_sensitive(True)
         else:
+            self.profile_dropdown.set_selected(0)
             self.profile_start_button.set_sensitive(False)
         if self.profile_delete_button:
-            self.profile_delete_button.set_sensitive(bool(labels))
+            self.profile_delete_button.set_sensitive(bool(profiles))
 
     def on_profile_selection_changed(self, _dropdown, _param):
         if not self.profile_delete_button:
             return
-        has_selection = (
-            bool(self.profile_ids)
-            and self.profile_dropdown is not None
-            and self.profile_dropdown.get_selected() >= 0
-        )
-        self.profile_delete_button.set_sensitive(has_selection)
+        if not self.profile_dropdown:
+            return
+        index = self.profile_dropdown.get_selected()
+        if index < 0 or index >= len(self.profile_ids):
+            self.profile_delete_button.set_sensitive(False)
+            self.profile_start_button.set_sensitive(False)
+            return
+        profile_id = self.profile_ids[index]
+        if profile_id is self.profile_placeholder_marker:
+            self.profile_delete_button.set_sensitive(False)
+            self.profile_start_button.set_sensitive(False)
+            return
+        if profile_id is self.profile_create_marker:
+            self.profile_delete_button.set_sensitive(False)
+            self.profile_start_button.set_sensitive(False)
+            self.on_create_profile_clicked(None)
+            return
+        self.profile_last_selected_index = index
+        self.profile_delete_button.set_sensitive(True)
+        self.profile_start_button.set_sensitive(True)
 
     def on_profile_close_request(self, _window):
         if self.profile_allow_close:
@@ -424,6 +446,8 @@ class SpellingBeeApp(Gtk.Application):
         if index < 0 or index >= len(self.profile_ids):
             return
         profile_id = self.profile_ids[index]
+        if profile_id in (self.profile_placeholder_marker, self.profile_create_marker):
+            return
         row = self.tracking_conn.execute(
             "SELECT name, grade_level, ability_rating, attempts_count FROM profiles WHERE id = ?",
             (profile_id,),
@@ -453,11 +477,13 @@ class SpellingBeeApp(Gtk.Application):
         self.load_default_words()
 
     def on_create_profile_clicked(self, _button):
+        self.profile_create_confirmed = False
         dialog = Gtk.Window(
             transient_for=self.profile_window or self.window,
             modal=True,
             title="Create profile",
         )
+        dialog.connect("close-request", self.on_create_profile_cancel)
         dialog.set_default_size(320, -1)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_top(12)
@@ -482,6 +508,13 @@ class SpellingBeeApp(Gtk.Application):
         create_button = Gtk.Button(label="Create")
 
         cancel_button.connect("clicked", lambda _b: dialog.close())
+        name_entry.connect(
+            "activate",
+            self.on_create_profile_confirm,
+            dialog,
+            name_entry,
+            grade_dropdown,
+        )
         create_button.connect(
             "clicked",
             self.on_create_profile_confirm,
@@ -510,6 +543,8 @@ class SpellingBeeApp(Gtk.Application):
         if index < 0 or index >= len(self.profile_ids):
             return
         profile_id = self.profile_ids[index]
+        if profile_id in (self.profile_placeholder_marker, self.profile_create_marker):
+            return
         row = self.tracking_conn.execute(
             "SELECT name FROM profiles WHERE id = ?",
             (profile_id,),
@@ -578,10 +613,31 @@ class SpellingBeeApp(Gtk.Application):
             self.show_error_dialog("Profile error", str(exc))
             return
 
+        self.profile_create_confirmed = True
         dialog.close()
         self.refresh_profile_dropdown()
         if new_profile_id in self.profile_ids:
             self.profile_dropdown.set_selected(self.profile_ids.index(new_profile_id))
+
+    def on_create_profile_cancel(self, _dialog):
+        if self.profile_create_confirmed:
+            return False
+        if not self.profile_dropdown:
+            return False
+        index = self.profile_last_selected_index
+        if index is not None and 0 <= index < len(self.profile_ids):
+            if self.profile_ids[index] not in (
+                self.profile_placeholder_marker,
+                self.profile_create_marker,
+            ):
+                self.profile_dropdown.set_selected(index)
+                return False
+        self.profile_dropdown.set_selected(0)
+        if self.profile_delete_button:
+            self.profile_delete_button.set_sensitive(False)
+        if self.profile_start_button:
+            self.profile_start_button.set_sensitive(False)
+        return False
 
     def find_words_csv(self):
         data_roots = [sysconfig.get_paths().get("data"), site.USER_BASE]
